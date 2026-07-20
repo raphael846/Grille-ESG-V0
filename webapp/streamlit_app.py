@@ -56,10 +56,10 @@ def geoapify_key_from_secrets():
 # Modèle OpenAI de vérification (peu coûteux, structured output). Ajustable ici.
 OPENAI_MODEL = "gpt-4o-mini"
 
-# Ordre d'affichage / de lancement des critères.
+# Ordre d'affichage / de lancement des critères (S2 -> S6 -> S7).
 CRITERES = [
-    ("S6", "S6 — Exposition à la biodiversité"),
     ("S2", "S2 — Présence de services"),
+    ("S6", "S6 — Exposition à la biodiversité"),
     ("S7", "S7 — Mobilité durable"),
 ]
 
@@ -97,49 +97,24 @@ def run_pipeline(kind, address, locataire, out):
 
 
 def build_comment(kind, cfg):
-    """Commentaire court prêt à coller dans Soneka pour le critère."""
-    date = cfg.get("analysis_date", "")
+    """Commentaire court à coller dans Soneka : nom + distance (typologie pour S2)."""
     score, smax = cfg.get("score", 0), cfg.get("score_max", 0)
-    ok = score >= smax
-    src = ("sources : API Adresse (France) + Geoapify/OpenStreetMap, itinéraires "
-           "piétons ; itinéraire vérifiable via le lien Google Maps du PDF")
+    verdict = "VALIDÉ" if score >= smax else "NON VALIDÉ"
 
     if kind == "S6":
         p = cfg["green_space"]
-        if ok:
-            return (f"Critère S6 — Exposition à la biodiversité : VALIDÉ ({score}/{smax}). "
-                    f"Espace vert praticable à moins d'1 km à pied : {p['name']} "
-                    f"({p.get('type', 'espace vert').lower()}), à {p['walk_distance_m']} m "
-                    f"({p['walk_time_min']} min à pied) de l'actif. Analyse du {date}. {src}.")
-        return (f"Critère S6 — Exposition à la biodiversité : NON VALIDÉ ({score}/{smax}). "
-                f"Aucun espace vert praticable à moins d'1 km à pied (le plus proche : "
-                f"{p['name']}, {p['walk_distance_m']} m). Analyse du {date}. {src}.")
+        return (f"S6 — Biodiversité : {verdict} ({score}/{smax}) — "
+                f"{p['name']}, {p['walk_distance_m']} m à pied.")
 
     if kind == "S2":
-        svcs = cfg["services"]
-        det = " ; ".join(f"{s['cat'].lower()} ({s['name']}, {s['walk_distance_m']} m)"
-                         for s in svcs)
-        if ok:
-            return (f"Critère S2 — Présence de services : VALIDÉ ({score}/{smax}). "
-                    f"{len(svcs)} services de catégories différentes à moins d'1 km à pied : "
-                    f"{det}. Analyse du {date}. {src}.")
-        return (f"Critère S2 — Présence de services : NON VALIDÉ ({score}/{smax}). "
-                f"Seulement {len(svcs)} service(s) de catégories différentes à moins d'1 km : "
-                f"{det or 'aucun'}. Analyse du {date}. {src}.")
+        det = ", ".join(f"{s['name']} ({s['cat'].lower()}, {s['walk_distance_m']} m)"
+                        for s in cfg["services"])
+        return f"S2 — Services : {verdict} ({score}/{smax}) — {det or 'aucun'}."
 
-    # S7
-    svcs = cfg["services"]
-    det = " ; ".join(
-        f"{s['mode'].lower()} ({s['name']}, {s['walk_distance_m']} m"
-        + (f", {len(s['lines'])} ligne(s)" if s.get("lines") else "") + ")"
-        for s in svcs)
-    if ok:
-        return (f"Critère S7 — Mobilité durable : VALIDÉ ({score}/{smax}). "
-                f"Transports en commun à moins d'1 km à pied ({cfg.get('transports', '')}) : "
-                f"{det}. Analyse du {date}. {src}.")
-    return (f"Critère S7 — Mobilité durable : NON VALIDÉ ({score}/{smax}). "
-            f"Desserte insuffisante à moins d'1 km : {det or 'aucun arrêt'}. "
-            f"Analyse du {date}. {src}.")
+    # S7 : nom du transport + distance
+    det = ", ".join(f"{s['mode'].lower()} {s['name']} ({s['walk_distance_m']} m)"
+                    for s in cfg["services"])
+    return f"S7 — Mobilité : {verdict} ({score}/{smax}) — {det or 'aucun arrêt'}."
 
 
 def verify_with_openai(cfg, key):
@@ -316,6 +291,8 @@ if submitted:
                 results.append({"kind": kind, "error": str(e)})
     # Persiste : un clic sur un bouton de téléchargement relance le script.
     st.session_state["results"] = results
+    if any("cfg" in r for r in results):
+        st.balloons()  # confettis quand la recherche est terminée
 
 for r in st.session_state.get("results", []):
     render_result(r)

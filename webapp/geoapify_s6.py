@@ -19,11 +19,14 @@ Nominatim pour la France) ; espaces verts et itinéraire restent sur OSM.
 """
 
 import urllib.parse
+import urllib.request
 
 import build_report
 import s6_auto
 import s2_auto
 import s7_auto
+
+UA = {"User-Agent": "esg-geoapify/1.0"}
 
 _KEY = ""
 
@@ -38,6 +41,7 @@ _orig_route = s6_auto.walk_route
 _orig_find_services = s2_auto.find_services      # S2
 _orig_find_transit = s7_auto.find_transit        # S7
 _orig_stop_lines = s7_auto.stop_lines            # S7
+_orig_online_map = build_report.try_online_map   # carte de preuve
 
 
 def set_key(key):
@@ -305,7 +309,7 @@ _CAT_MODE = {"bus": "Bus", "tram": "Tram", "subway": "Métro", "train": "Train",
 def find_transit(lat, lon, radius=s7_auto.THRESHOLD_M):
     if _KEY:
         try:
-            feats = _places_retry(lat, lon, radius, "public_transport", 200)
+            feats = _places_retry(lat, lon, radius, "public_transport", 60)
             stops, ref_lines = [], {}
             for p in feats:
                 t = p["raw"]
@@ -348,6 +352,49 @@ def stop_lines(stop):
     return _orig_stop_lines(stop)
 
 
+# ---------------------------------------------------------------------------
+# Carte de preuve : Static Maps Geoapify (1 requête/image) -> repli staticmap OSM
+# ---------------------------------------------------------------------------
+
+def try_online_map(asset, park, out_path, timeout=15):
+    """Carte de preuve via l'API Static Maps de Geoapify : une seule requête par
+    image (bien plus rapide que le rendu tuile par tuile de staticmap, et sans
+    rate-limit sur les tuiles OSM publiques). Repli sur la carte OSM d'origine."""
+    if _KEY:
+        try:
+            lon1, lat1 = asset["lon"], asset["lat"]
+            lon2, lat2 = park["lon"], park["lat"]
+            span = max(abs(lat1 - lat2), abs(lon1 - lon2))
+            pad = max(0.0009, span * 0.3)
+            west, east = min(lon1, lon2) - pad, max(lon1, lon2) + pad
+            south, north = min(lat1, lat2) - pad, max(lat1, lat2) + pad
+            params = {
+                "style": "osm-bright", "width": 1400, "height": 900,
+                "area": f"rect:{west},{south},{east},{north}",
+                "marker": (f"lonlat:{lon1},{lat1};color:#d93025;size:medium"
+                           f"|lonlat:{lon2},{lat2};color:#188038;size:medium"),
+                "geometry": (f"polyline:{lon1},{lat1},{lon2},{lat2}"
+                             f";linecolor:#1a73e8;linewidth:5;lineopacity:0.8"),
+                "apiKey": _KEY,
+            }
+            # urlencode encode les délimiteurs (| ; : , #) — sinon urllib rejette
+            # l'URL (caractères illégaux) ; Geoapify les redécode côté serveur.
+            url = ("https://maps.geoapify.com/v1/staticmap?"
+                   + urllib.parse.urlencode(params))
+            req = urllib.request.Request(url, headers=UA)
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = resp.read()
+            # Geoapify renvoie du JPEG (ou PNG) : accepter les deux.
+            if not (data[:3] == b"\xff\xd8\xff" or data[:8] == b"\x89PNG\r\n\x1a\n"):
+                raise RuntimeError("réponse Static Maps non-image")
+            with open(out_path, "wb") as f:
+                f.write(data)
+            return out_path, "carte Geoapify (fond OpenStreetMap)"
+        except Exception:
+            pass  # repli sur la carte OSM (staticmap) d'origine
+    return _orig_online_map(asset, park, out_path, timeout)
+
+
 def source_prefix():
     """Préfixe honnête à substituer dans cfg['source'] après research()."""
     return f"{last['geocode']} + {last['places']}"
@@ -360,3 +407,4 @@ s6_auto.walk_route = walk_route
 s2_auto.find_services = find_services
 s7_auto.find_transit = find_transit
 s7_auto.stop_lines = stop_lines
+build_report.try_online_map = try_online_map
