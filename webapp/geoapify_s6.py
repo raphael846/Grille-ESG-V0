@@ -76,6 +76,21 @@ def geocode(address):
 # Espaces verts : Geoapify Places (+ bord via place-details) -> repli Overpass
 # ---------------------------------------------------------------------------
 
+# OSM tague parfois une place minérale en leisure=park (ex. « Place José Martí »).
+# En français, « Place / Placette / Parvis / Rond-point / Esplanade / Cours »
+# désignent des espaces le plus souvent non praticables comme espace vert, alors
+# que « Parc / Jardin / Square / Bois / Promenade » sont verts. On DÉPRIORISE ces
+# noms (named=False) : un espace clairement vert est préféré quand il en existe un
+# sous le seuil, mais la place reste candidate en dernier recours — on ne perd
+# donc pas les cas légitimes (Place des Vosges = vrai jardin).
+_NON_GREEN_PREFIXES = ("place ", "placette ", "parvis ", "rond-point",
+                       "rond point", "esplanade ", "cours ")
+
+
+def _is_non_green_square(name):
+    n = (name or "").strip().lower()
+    return any(n.startswith(p) for p in _NON_GREEN_PREFIXES)
+
 def _ga_places(lat, lon, radius, categories, limit=50):
     url = ("https://api.geoapify.com/v2/places?categories=" + categories
            + f"&filter=circle:{lon},{lat},{int(radius)}&limit={limit}"
@@ -134,12 +149,16 @@ def find_green_spaces(lat, lon, radius):
                 continue
             kind = (raw.get("leisure") or raw.get("natural") or raw.get("landuse")
                     or ("beach" if "beach" in p["categories"] else ""))
-            name = p["name"] or raw.get("name") or "Espace vert (sans nom OSM)"
+            real_name = p["name"] or raw.get("name")
+            name = real_name or "Espace vert (sans nom OSM)"
+            # named = nom d'un vrai espace vert (une « Place… » minérale est
+            # dépriorisée pour ne pas passer devant un parc/jardin/square voisin).
+            named = bool(real_name) and not _is_non_green_square(real_name)
             s = {
                 "name": name,
                 "type": s6_auto.PARK_TYPES_FR.get(kind, "Espace vert"),
                 "lat": p["lat"], "lon": p["lon"],
-                "named": bool(p["name"] or raw.get("name")),
+                "named": named,
                 "crow_m": build_report.haversine_m(lat, lon, p["lat"], p["lon"]),
                 # Pas de bbox/osm_id Geoapify : le bord est déjà affiné ci-dessous,
                 # ce qui neutralise refine_park_target (qui exige un way OSM).

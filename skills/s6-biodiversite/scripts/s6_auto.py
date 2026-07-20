@@ -382,9 +382,9 @@ def research(address, radius=1200, candidates=5, locataire=None):
     if any_ok:
         nearest_any = min(any_ok, key=lambda e: e[0])
         if nearest_any[3] is not park and nearest_any[0] < dist:
-            checks.append(f"NB : un espace vert sans nom OSM existe encore "
-                          f"plus près ({nearest_any[0]} m) ; le parc nommé "
-                          f"est retenu comme preuve plus solide")
+            checks.append(f"NB : un espace vert plus proche existe "
+                          f"({nearest_any[0]} m) ; le parc nommé est retenu "
+                          f"comme preuve plus solide")
 
     # Situer un espace sans nom par géocodage inverse : plus parlant dans le
     # rapport qu'un simple « sans nom », sans rien inventer.
