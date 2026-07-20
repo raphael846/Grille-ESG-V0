@@ -65,6 +65,32 @@ CRITERES = [
 ]
 
 
+def koala_walk():
+    """Un koala qui se balade en bas de l'appli (déco, n'intercepte pas les clics)."""
+    st.markdown(
+        """
+        <style>
+        @keyframes koala-walk {
+          0%   { left: -64px; transform: scaleX(1); }
+          49%  { left: calc(100vw - 8px); transform: scaleX(1); }
+          50%  { left: calc(100vw - 8px); transform: scaleX(-1); }
+          99%  { left: -64px; transform: scaleX(-1); }
+          100% { left: -64px; transform: scaleX(1); }
+        }
+        @keyframes koala-bob { 0%,100% { bottom: 12px; } 50% { bottom: 22px; } }
+        #koala-walker {
+          position: fixed; bottom: 12px; left: -64px; font-size: 42px;
+          z-index: 9999; pointer-events: none; will-change: left, bottom, transform;
+          animation: koala-walk 26s linear infinite,
+                     koala-bob 0.6s ease-in-out infinite;
+        }
+        </style>
+        <div id="koala-walker">🐨</div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def slugify(text):
     """Nom de fichier sûr (repris de webapp/app.py)."""
     text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
@@ -291,6 +317,7 @@ st.set_page_config(page_title="Greenfast — grille ESG", page_icon="🌿")
 st.title("🌿 Greenfast")
 st.caption("Instruction automatisée de la grille ESG d'un actif — critères "
            "géolocalisés services (S2), biodiversité (S6) et mobilité (S7)")
+koala_walk()
 
 with st.form("esg"):
     st.markdown("**Critères à instruire** (cochez-en un ou plusieurs) :")
