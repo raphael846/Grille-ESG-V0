@@ -25,6 +25,7 @@ import re
 import sys
 import tempfile
 import unicodedata
+import urllib.parse
 
 import streamlit as st
 
@@ -68,6 +69,23 @@ def slugify(text):
     """Nom de fichier sûr (repris de webapp/app.py)."""
     text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
     return re.sub(r"[^A-Za-z0-9]+", "_", text).strip("_") or "rapport"
+
+
+def geocode_candidates(address, limit=5):
+    """Candidats d'adresse via l'API Adresse (BAN). Vide si non-France / échec."""
+    url = ("https://api-adresse.data.gouv.fr/search/?limit=%d&q=%s"
+           % (limit, urllib.parse.quote(address)))
+    try:
+        data = s6_auto.http_json(url, timeout=8)
+    except Exception:
+        return []
+    out = []
+    for f in data.get("features", []):
+        p = f.get("properties", {})
+        out.append({"label": p.get("label", ""), "city": p.get("city", ""),
+                    "postcode": p.get("postcode", ""),
+                    "score": p.get("score", 0), "type": p.get("type", "")})
+    return out
 
 
 def run_pipeline(kind, address, locataire, out):
@@ -243,7 +261,7 @@ st.caption("Instruction automatisée de la grille ESG d'un actif — critères "
 
 with st.form("esg"):
     st.markdown("**Critères à instruire** (cochez-en un ou plusieurs) :")
-    checks_ui = {k: st.checkbox(label, value=(k == "S6")) for k, label in CRITERES}
+    checks_ui = {k: st.checkbox(label, value=False) for k, label in CRITERES}
     address = st.text_input(
         "Adresse de l'actif",
         placeholder="ex. 4 rue de la Pompe, 75116 Paris")
@@ -266,6 +284,24 @@ if submitted:
         st.stop()
     if not kinds:
         st.error("Cochez au moins un critère.")
+        st.stop()
+
+    # Adresse ambiguë (ex. « rue de Paris » -> plusieurs villes) : demander une
+    # précision plutôt que de géocoder au hasard. Ne bloque que les adresses
+    # françaises ambiguës ; une adresse hors France (absente de la BAN) passe.
+    # La BAN note ~0,98 chaque correspondance exacte du nom de voie : une voie
+    # présente dans plusieurs communes ressort donc en plusieurs candidats forts.
+    # Ambiguïté = plusieurs communes parmi les candidats à score élevé. Un score
+    # faible partout (adresse hors France) => aucun candidat fort => on laisse
+    # passer (le pipeline tentera Nominatim).
+    cands = geocode_candidates(address.strip())
+    high = [c for c in cands if c["score"] >= 0.6]
+    if high and len({(c["postcode"], c["city"]) for c in high}) > 1:
+        st.warning("Adresse ambiguë — cette voie existe dans plusieurs communes. "
+                   "Précisez la **ville** ou le **code postal**, puis relancez. "
+                   "Par exemple :")
+        for c in high[:6]:
+            st.write(f"• {c['label']}")
         st.stop()
 
     geoapify_s6.set_key(geoapify_key_from_secrets())
