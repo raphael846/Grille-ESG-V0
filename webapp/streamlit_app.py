@@ -236,8 +236,10 @@ def render_result(r):
                        "le rapport reste valable.")
 
 
-st.set_page_config(page_title="Rapports ESG géolocalisés", page_icon="🌳")
-st.title("Rapports ESG géolocalisés — S6 · S2 · S7")
+st.set_page_config(page_title="Proxima — ESG géolocalisé", page_icon="📍")
+st.title("📍 Proxima")
+st.caption("Instruction ESG géolocalisée — services (S2), biodiversité (S6) et "
+           "mobilité (S7) à moins d'1 km à pied de l'actif")
 
 with st.form("esg"):
     st.markdown("**Critères à instruire** (cochez-en un ou plusieurs) :")
