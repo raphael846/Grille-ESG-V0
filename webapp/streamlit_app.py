@@ -5,11 +5,12 @@ Lancement :
     pip install -r requirements.txt
     streamlit run webapp/streamlit_app.py
 
-L'utilisateur tape l'adresse de l'actif ; l'app fait la recherche (OpenStreetMap),
-génère le PDF (capture Google Maps automatique quand l'environnement le permet,
-sinon carte OSM, sinon schéma) et l'offre en téléchargement. Si une clé OpenAI est
-fournie, un avis de cohérence du résultat est affiché — optionnel, jamais bloquant,
-la clé n'est ni stockée ni journalisée.
+L'utilisateur tape l'adresse de l'actif ; l'app géocode (API Adresse de l'État,
+repli Nominatim), cherche l'espace vert et l'itinéraire piéton (Geoapify si une
+clé est disponible, sinon OpenStreetMap), génère le PDF (carte OSM en ligne ou
+schéma — la capture Google Maps est désactivée ici, cf. plus bas) et l'offre en
+téléchargement. Si une clé OpenAI est fournie, un avis de cohérence du résultat
+est affiché — optionnel, jamais bloquant. Aucune clé n'est stockée ni journalisée.
 """
 
 import json
@@ -22,10 +23,12 @@ import unicodedata
 import streamlit as st
 
 # Réutilise le socle des scripts (géocodage, Overpass, OSRM, cascade de preuve, PDF).
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                "..", "skills", "s6-biodiversite", "scripts"))
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(_HERE, "..", "skills", "s6-biodiversite", "scripts"))
+sys.path.insert(0, _HERE)  # pour importer geoapify_s6 (même dossier)
 import build_report  # noqa: E402  -> generate(cfg, out) renvoie le niveau de preuve
 import s6_auto        # noqa: E402  -> research(address, radius, locataire) -> cfg
+import geoapify_s6    # noqa: E402  -> patche s6_auto pour passer par Geoapify/BAN
 
 # Streamlit Community Cloud n'a pas de navigateur Chromium : la capture Google
 # Maps (Playwright) échouerait après un long timeout et tenterait de télécharger
@@ -33,6 +36,14 @@ import s6_auto        # noqa: E402  -> research(address, radius, locataire) -> c
 # s6.html gardent la capture) ; la preuve tombe alors sur la carte OpenStreetMap
 # en ligne avec l'itinéraire piéton OSRM réel, qui fonctionne sur le cloud.
 build_report.try_maps_capture = lambda *a, **k: None  # noqa: E731
+
+
+def geoapify_key_from_secrets():
+    """Clé Geoapify depuis les Secrets Streamlit (vide si non configurés)."""
+    try:
+        return (st.secrets.get("GEOAPIFY_KEY", "") or "").strip()
+    except Exception:
+        return ""
 
 # Modèle OpenAI de vérification (peu coûteux, structured output). Ajustable ici.
 OPENAI_MODEL = "gpt-4o-mini"
@@ -110,6 +121,12 @@ with st.form("s6"):
     locataire = st.text_input(
         "Locataire / enseigne (optionnel)",
         placeholder="confirme le bâtiment, ou ancre le point si l'adresse est vague")
+    ga_ui = st.text_input(
+        "Clé Geoapify (optionnelle — sinon lue dans les Secrets)",
+        type="password", placeholder="laisser vide si configurée dans les Secrets")
+    st.caption("Géocodage via l'API Adresse de l'État (France) ; espaces verts "
+               "et itinéraire via Geoapify si une clé est disponible, sinon "
+               "OpenStreetMap. La clé n'est ni stockée ni journalisée.")
     openai_key = st.text_input(
         "Clé API OpenAI (optionnelle — active la vérification du résultat)",
         type="password", placeholder="sk-...")
@@ -124,13 +141,20 @@ if submitted:
     with st.spinner("Recherche de l'espace vert, itinéraire piéton et carte "
                     "(30 à 60 s)…"):
         try:
+            geoapify_s6.set_key(ga_ui.strip() or geoapify_key_from_secrets())
             cfg = s6_auto.research(address.strip(),
                                    locataire=locataire.strip() or None)
+            # Source honnête : refléter les services réellement utilisés
+            # (BAN/Nominatim + Geoapify/Overpass) au lieu du libellé OSM figé.
+            cfg["source"] = cfg["source"].replace(
+                "OpenStreetMap (Nominatim + Overpass)",
+                geoapify_s6.source_prefix())
             out = os.path.join(tempfile.mkdtemp(prefix="s6st_"),
                                f"S6_{slugify(address)}.pdf")
             proof = build_report.generate(cfg, out)
             with open(out, "rb") as f:
                 pdf_bytes = f.read()
+            sources = dict(geoapify_s6.last)
         except Exception as e:
             st.error(f"Recherche impossible : {e}")
             st.stop()
@@ -148,7 +172,7 @@ if submitted:
     st.session_state["result"] = {
         "cfg": cfg, "proof": proof, "pdf_bytes": pdf_bytes,
         "filename": os.path.basename(out), "verif": verif,
-        "verif_error": verif_error,
+        "verif_error": verif_error, "sources": sources,
     }
 
 res = st.session_state.get("result")
@@ -167,6 +191,10 @@ if res:
 
     st.markdown(f"**Niveau de preuve :** {res['proof']}")
     st.markdown(f"**Source :** {cfg.get('source', '—')}")
+    src = res.get("sources") or {}
+    if src:
+        st.caption(f"Géocodage : {src.get('geocode', '?')} · Espaces verts : "
+                   f"{src.get('places', '?')}")
     if cfg.get("maps_url"):
         st.markdown(f"**Itinéraire vérifiable :** [{cfg['maps_url']}]({cfg['maps_url']})")
 
