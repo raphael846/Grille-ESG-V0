@@ -5,12 +5,13 @@ Lancement :
     pip install -r requirements.txt
     streamlit run webapp/streamlit_app.py
 
-L'utilisateur choisit un critère et tape l'adresse de l'actif ; l'app géocode
-(API Adresse de l'État, repli Nominatim), cherche les POI et l'itinéraire piéton
-(Geoapify si une clé est dans les Secrets, sinon OpenStreetMap), génère le PDF
-(carte OSM en ligne ou schéma — la capture Google Maps est désactivée ici) et
-l'offre en téléchargement. Pour S6, une vérification OpenAI du résultat est
-proposée si une clé OpenAI est saisie. Aucune clé n'est stockée ni journalisée.
+L'utilisateur coche un ou plusieurs critères et tape l'adresse de l'actif ;
+l'app géocode (API Adresse de l'État, repli Nominatim), cherche les POI et
+l'itinéraire piéton (Geoapify si une clé est dans les Secrets, sinon
+OpenStreetMap), génère un PDF par critère (carte OSM en ligne ou schéma — la
+capture Google Maps est désactivée ici) et, pour chaque critère, un commentaire
+prêt à coller dans Soneka. Pour S6, une vérification OpenAI est proposée si une
+clé OpenAI est saisie. Aucune clé n'est stockée ni journalisée.
 
 Critères :
   - S6 : espace vert praticable à moins d'1 km à pied (4/4 ou 0)
@@ -55,11 +56,12 @@ def geoapify_key_from_secrets():
 # Modèle OpenAI de vérification (peu coûteux, structured output). Ajustable ici.
 OPENAI_MODEL = "gpt-4o-mini"
 
-CRITERES = {
-    "S6 — Exposition à la biodiversité": "S6",
-    "S2 — Présence de services": "S2",
-    "S7 — Mobilité durable": "S7",
-}
+# Ordre d'affichage / de lancement des critères.
+CRITERES = [
+    ("S6", "S6 — Exposition à la biodiversité"),
+    ("S2", "S2 — Présence de services"),
+    ("S7", "S7 — Mobilité durable"),
+]
 
 
 def slugify(text):
@@ -71,21 +73,19 @@ def slugify(text):
 def run_pipeline(kind, address, locataire, out):
     """Exécute le pipeline du critère et écrit le PDF dans `out`.
 
-    Retourne (cfg, proof_label). Le géocodage, les POI et l'itinéraire passent
-    par Geoapify/BAN via les patches de geoapify_s6 (repli OSM automatique).
+    Retourne (cfg, proof_label). Géocodage, POI et itinéraire passent par
+    Geoapify/BAN via les patches de geoapify_s6 (repli OSM automatique).
     """
     if kind == "S6":
         cfg = s6_auto.research(address, locataire=locataire)
         proof = build_report.generate(cfg, out)
     elif kind == "S2":
         cfg = s2_auto.research(address, locataire=locataire)
-        proofs = s2_auto.gather_proofs(cfg)
-        s2_auto.build_pdf(cfg, proofs, out)
+        s2_auto.build_pdf(cfg, s2_auto.gather_proofs(cfg), out)
         proof = "une preuve par service (carte OSM en ligne / schéma)"
     else:  # S7
         cfg = s7_auto.research(address, locataire=locataire)
-        proofs = s2_auto.gather_proofs(cfg)  # même forme que S2
-        s7_auto.build_pdf(cfg, proofs, out)
+        s7_auto.build_pdf(cfg, s2_auto.gather_proofs(cfg), out)  # preuves = forme S2
         proof = "une preuve par arrêt (carte OSM en ligne / schéma)"
 
     # Source honnête : refléter les services réellement utilisés.
@@ -94,6 +94,52 @@ def run_pipeline(kind, address, locataire, out):
     cfg["source"] = cfg["source"].replace(
         "itinéraires piétons OSM", "itinéraires piétons (Geoapify si clé, sinon OSM)")
     return cfg, proof
+
+
+def build_comment(kind, cfg):
+    """Commentaire court prêt à coller dans Soneka pour le critère."""
+    date = cfg.get("analysis_date", "")
+    score, smax = cfg.get("score", 0), cfg.get("score_max", 0)
+    ok = score >= smax
+    src = ("sources : API Adresse (France) + Geoapify/OpenStreetMap, itinéraires "
+           "piétons ; itinéraire vérifiable via le lien Google Maps du PDF")
+
+    if kind == "S6":
+        p = cfg["green_space"]
+        if ok:
+            return (f"Critère S6 — Exposition à la biodiversité : VALIDÉ ({score}/{smax}). "
+                    f"Espace vert praticable à moins d'1 km à pied : {p['name']} "
+                    f"({p.get('type', 'espace vert').lower()}), à {p['walk_distance_m']} m "
+                    f"({p['walk_time_min']} min à pied) de l'actif. Analyse du {date}. {src}.")
+        return (f"Critère S6 — Exposition à la biodiversité : NON VALIDÉ ({score}/{smax}). "
+                f"Aucun espace vert praticable à moins d'1 km à pied (le plus proche : "
+                f"{p['name']}, {p['walk_distance_m']} m). Analyse du {date}. {src}.")
+
+    if kind == "S2":
+        svcs = cfg["services"]
+        det = " ; ".join(f"{s['cat'].lower()} ({s['name']}, {s['walk_distance_m']} m)"
+                         for s in svcs)
+        if ok:
+            return (f"Critère S2 — Présence de services : VALIDÉ ({score}/{smax}). "
+                    f"{len(svcs)} services de catégories différentes à moins d'1 km à pied : "
+                    f"{det}. Analyse du {date}. {src}.")
+        return (f"Critère S2 — Présence de services : NON VALIDÉ ({score}/{smax}). "
+                f"Seulement {len(svcs)} service(s) de catégories différentes à moins d'1 km : "
+                f"{det or 'aucun'}. Analyse du {date}. {src}.")
+
+    # S7
+    svcs = cfg["services"]
+    det = " ; ".join(
+        f"{s['mode'].lower()} ({s['name']}, {s['walk_distance_m']} m"
+        + (f", {len(s['lines'])} ligne(s)" if s.get("lines") else "") + ")"
+        for s in svcs)
+    if ok:
+        return (f"Critère S7 — Mobilité durable : VALIDÉ ({score}/{smax}). "
+                f"Transports en commun à moins d'1 km à pied ({cfg.get('transports', '')}) : "
+                f"{det}. Analyse du {date}. {src}.")
+    return (f"Critère S7 — Mobilité durable : NON VALIDÉ ({score}/{smax}). "
+            f"Desserte insuffisante à moins d'1 km : {det or 'aucun arrêt'}. "
+            f"Analyse du {date}. {src}.")
 
 
 def verify_with_openai(cfg, key):
@@ -151,11 +197,76 @@ def verify_with_openai(cfg, key):
     return json.loads(resp.choices[0].message.content)
 
 
+def render_result(r):
+    """Affiche un résultat de critère (bandeau, PDF, commentaire Soneka, détail)."""
+    st.divider()
+    if r.get("error"):
+        st.error(f"{r['kind']} — échec : {r['error']}")
+        return
+    kind, cfg = r["kind"], r["cfg"]
+    score, smax = cfg.get("score", 0), cfg.get("score_max", 0)
+    validated = score >= smax
+    verdict = "Critère validé" if validated else "Critère non validé"
+
+    if kind == "S6":
+        p = cfg["green_space"]
+        detail = f"{p['name']} à {p['walk_distance_m']} m à pied ({p['walk_time_min']} min)"
+    elif kind == "S2":
+        detail = f"{len(cfg['services'])} service(s) de catégories différentes sous le seuil"
+    else:
+        detail = f"{cfg.get('transports', '')} à moins d'1 km"
+
+    st.subheader(dict(CRITERES)[kind])
+    (st.success if validated else st.error)(
+        f"SCORE {score}/{smax} — {verdict} — {detail}")
+
+    st.download_button("⬇️ Télécharger le PDF", data=r["pdf_bytes"],
+                       file_name=r["filename"], mime="application/pdf",
+                       key=f"dl_{kind}")
+
+    st.markdown("**Commentaire à coller dans Soneka** (icône copier en haut à droite) :")
+    st.code(r["comment"], language=None)
+
+    src = r.get("sources") or {}
+    st.caption(f"Preuve : {r['proof']} · Géocodage : {src.get('geocode', '?')} · "
+               f"POI : {src.get('places', '?')}")
+
+    if kind == "S2" and cfg.get("services"):
+        st.table([{"Catégorie": s["cat"], "Nom": s["name"],
+                   "Distance": f"{s['walk_distance_m']} m",
+                   "Temps": f"{s['walk_time_min']} min"} for s in cfg["services"]])
+    elif kind == "S7" and cfg.get("services"):
+        rows = []
+        for s in cfg["services"]:
+            refs = ", ".join(s["lines"][:8]) + ("…" if len(s["lines"]) > 8 else "")
+            rows.append({"Mode": s["mode"], "Arrêt": s["name"],
+                         "Distance": f"{s['walk_distance_m']} m",
+                         "Lignes": (f"{len(s['lines'])} — {refs}" if s["lines"] else "n.c.")})
+        st.table(rows)
+
+    checks = cfg.get("checks") or []
+    if checks:
+        with st.expander("Contrôles automatiques"):
+            for c in checks:
+                (st.warning if c.startswith("ATTENTION") else st.info)(c)
+
+    if kind == "S6":
+        if r.get("verif"):
+            v = r["verif"]
+            (st.success if v.get("coherent") else st.warning)(
+                f"Vérification OpenAI — cohérent : {'oui' if v.get('coherent') else 'non'} "
+                f"(confiance {v.get('confiance', '?')}). {v.get('remarque', '')}")
+        elif r.get("verif_error"):
+            st.caption(f"Vérification IA indisponible ({r['verif_error']}) — "
+                       "le rapport reste valable.")
+
+
 st.set_page_config(page_title="Rapports ESG géolocalisés", page_icon="🌳")
 st.title("Rapports ESG géolocalisés — S6 · S2 · S7")
 
 with st.form("esg"):
-    choice = st.selectbox("Critère", list(CRITERES))
+    st.markdown("**Critères à instruire** (cochez-en un ou plusieurs) :")
+    checks_ui = {k: st.checkbox(label, value=(k == "S6")) for k, label in CRITERES}
     address = st.text_input(
         "Adresse de l'actif",
         placeholder="ex. 4 rue de la Pompe, 75116 Paris")
@@ -169,108 +280,42 @@ with st.form("esg"):
         type="password", placeholder="sk-...")
     st.caption("La clé n'est ni stockée ni journalisée ; pensez à fixer une "
                "limite de dépense sur platform.openai.com.")
-    submitted = st.form_submit_button("Générer le rapport PDF")
+    submitted = st.form_submit_button("Générer le(s) rapport(s)")
 
 if submitted:
-    kind = CRITERES[choice]
+    kinds = [k for k, _ in CRITERES if checks_ui[k]]
     if not address.strip():
-        st.error("Renseignez l'adresse de l'actif avant de générer le rapport.")
+        st.error("Renseignez l'adresse de l'actif avant de générer les rapports.")
         st.stop()
-    with st.spinner("Recherche des POI, itinéraire piéton et carte (30 à 60 s)…"):
-        try:
-            geoapify_s6.set_key(geoapify_key_from_secrets())
-            out = os.path.join(tempfile.mkdtemp(prefix="esgst_"),
-                               f"{kind}_{slugify(address)}.pdf")
-            cfg, proof = run_pipeline(kind, address.strip(),
-                                      locataire.strip() or None, out)
-            with open(out, "rb") as f:
-                pdf_bytes = f.read()
-            sources = dict(geoapify_s6.last)
-        except Exception as e:
-            st.error(f"Recherche impossible : {e}")
-            st.stop()
+    if not kinds:
+        st.error("Cochez au moins un critère.")
+        st.stop()
 
-    verif, verif_error = None, None
-    if kind == "S6" and openai_key.strip():
-        with st.spinner("Vérification du résultat par OpenAI…"):
+    geoapify_s6.set_key(geoapify_key_from_secrets())
+    results = []
+    for kind in kinds:
+        with st.spinner(f"{kind} — recherche des POI, itinéraire et carte…"):
             try:
-                verif = verify_with_openai(cfg, openai_key.strip())
+                out = os.path.join(tempfile.mkdtemp(prefix="esgst_"),
+                                   f"{kind}_{slugify(address)}.pdf")
+                cfg, proof = run_pipeline(kind, address.strip(),
+                                          locataire.strip() or None, out)
+                with open(out, "rb") as f:
+                    pdf_bytes = f.read()
+                r = {"kind": kind, "cfg": cfg, "proof": proof, "pdf_bytes": pdf_bytes,
+                     "filename": os.path.basename(out), "sources": dict(geoapify_s6.last),
+                     "comment": build_comment(kind, cfg), "verif": None,
+                     "verif_error": None}
+                if kind == "S6" and openai_key.strip():
+                    try:
+                        r["verif"] = verify_with_openai(cfg, openai_key.strip())
+                    except Exception as e:
+                        r["verif_error"] = str(e)
+                results.append(r)
             except Exception as e:
-                verif_error = str(e)
+                results.append({"kind": kind, "error": str(e)})
+    # Persiste : un clic sur un bouton de téléchargement relance le script.
+    st.session_state["results"] = results
 
-    # Persiste le résultat : sinon un clic sur le bouton de téléchargement
-    # relance le script et efface l'affichage.
-    st.session_state["result"] = {
-        "kind": kind, "cfg": cfg, "proof": proof, "pdf_bytes": pdf_bytes,
-        "filename": os.path.basename(out), "verif": verif,
-        "verif_error": verif_error, "sources": sources,
-    }
-
-res = st.session_state.get("result")
-if res:
-    cfg = res["cfg"]
-    kind = res["kind"]
-    score = cfg.get("score", 0)
-    score_max = cfg.get("score_max", 0)
-    validated = score >= score_max
-    verdict = "Critère validé" if validated else "Critère non validé"
-
-    if kind == "S6":
-        park = cfg["green_space"]
-        detail = (f"{park['name']} à {park['walk_distance_m']} m à pied "
-                  f"({park['walk_time_min']} min)")
-    elif kind == "S2":
-        detail = f"{len(cfg['services'])} service(s) de catégories différentes sous le seuil"
-    else:
-        detail = f"{cfg.get('transports', '')} à moins d'1 km"
-
-    banner = f"SCORE {score}/{score_max} — {verdict} — {detail}"
-    (st.success if validated else st.error)(banner)
-
-    st.download_button("⬇️ Télécharger le PDF", data=res["pdf_bytes"],
-                       file_name=res["filename"], mime="application/pdf")
-
-    st.markdown(f"**Preuve :** {res['proof']}")
-    st.markdown(f"**Source :** {cfg.get('source', '—')}")
-    src = res.get("sources") or {}
-    if src:
-        st.caption(f"Géocodage : {src.get('geocode', '?')} · POI : "
-                   f"{src.get('places', '?')}")
-
-    # Détail par critère
-    if kind == "S2":
-        st.subheader("Services retenus")
-        st.table([{"Catégorie": s["cat"], "Nom": s["name"],
-                   "Distance": f"{s['walk_distance_m']} m",
-                   "Temps": f"{s['walk_time_min']} min"} for s in cfg["services"]])
-    elif kind == "S7":
-        st.subheader("Desserte retenue")
-        rows = []
-        for s in cfg["services"]:
-            refs = ", ".join(s["lines"][:8]) + ("…" if len(s["lines"]) > 8 else "")
-            rows.append({"Mode": s["mode"], "Arrêt": s["name"],
-                         "Distance": f"{s['walk_distance_m']} m",
-                         "Lignes": (f"{len(s['lines'])} — {refs}" if s["lines"] else "n.c.")})
-        st.table(rows)
-
-    checks = cfg.get("checks") or []
-    if checks:
-        st.subheader("Contrôles automatiques")
-        for c in checks:
-            (st.warning if c.startswith("ATTENTION") else st.info)(c)
-
-    st.subheader("Vérification OpenAI")
-    if kind != "S6":
-        st.caption("Vérification IA : disponible pour le critère S6 uniquement.")
-    elif res["verif"]:
-        v = res["verif"]
-        (st.success if v.get("coherent") else st.warning)(
-            f"Cohérent : {'oui' if v.get('coherent') else 'non'} — "
-            f"confiance {v.get('confiance', '?')}")
-        st.write(v.get("remarque", ""))
-    elif res["verif_error"]:
-        st.info(f"Vérification IA indisponible ({res['verif_error']}) — "
-                "le rapport reste valable.")
-    else:
-        st.caption("Renseignez une clé OpenAI ci-dessus pour activer la "
-                   "vérification du résultat.")
+for r in st.session_state.get("results", []):
+    render_result(r)
