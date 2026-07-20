@@ -1,0 +1,23 @@
+{
+  "asset": {
+    "address": "4 rue de la Pompe, 75116 Paris",
+    "lat": 48.85882,
+    "lon": 2.27511
+  },
+  "green_space": {
+    "name": "Jardin du Ranelagh",
+    "type": "Parc public (parc paysager)",
+    "address": "1 Av. Prudhon, 75016 Paris (entrée côté Chaussée de la Muette)",
+    "lat": 48.85887,
+    "lon": 2.26878,
+    "walk_distance_m": 300,
+    "walk_time_min": 4,
+    "route_note": "via Chaussée de la Muette"
+  },
+  "source": "Google Maps, itinéraire piéton, consulté le 09/07/2026",
+  "maps_url": "https://www.google.com/maps/dir/4+Rue+de+la+Pompe,+75116+Paris/Jardin+du+Ranelagh,+1+Av.+Prudhon,+75016+Paris/data=!4m2!4m1!3e2",
+  "analysis_date": "09/07/2026",
+  "score": 4,
+  "score_max": 4,
+  "threshold_m": 1000
+}

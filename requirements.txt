@@ -1,0 +1,7 @@
+reportlab
+pillow
+staticmap
+playwright
+flask
+streamlit
+openai

@@ -1,0 +1,1537 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rapports ESG géolocalisés — S6 / S2</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<style>
+  body{font-family:system-ui,sans-serif;background:#f4f6f4;margin:0;
+       display:flex;min-height:100vh;align-items:center;justify-content:center}
+  main{background:#fff;padding:40px 44px;border-radius:12px;max-width:600px;
+       box-shadow:0 2px 14px rgba(0,0,0,.08)}
+  h1{font-size:1.3rem;margin:0 0 4px}
+  p.sub{color:#5f6b5f;margin:0 0 24px;font-size:.92rem}
+  input[type=text]{width:100%;padding:12px 14px;font-size:1rem;
+       border:1px solid #c8d0c8;border-radius:8px;box-sizing:border-box}
+  button{margin-top:14px;width:100%;padding:12px;font-size:1rem;border:0;
+       border-radius:8px;background:#188038;color:#fff;cursor:pointer}
+  button:disabled{background:#9bb8a4;cursor:wait}
+  #status{margin-top:16px;color:#5f6b5f;font-size:.9rem;min-height:1.2em}
+  #status.err{color:#8a1f16;background:#fdeceb;border:1px solid #f5c6c3;
+       padding:10px;border-radius:8px;white-space:pre-wrap}
+  .note{color:#777;font-size:.8rem;margin-top:22px}
+  canvas{display:none}
+</style>
+</head>
+<body>
+<main>
+  <h1>Rapports ESG géolocalisés</h1>
+  <p class="sub">S6 : espace vert · S2 : services — à moins d'1 km à pied de l'actif</p>
+  <div style="border:1px solid #c8d0c8;border-radius:8px;padding:10px 14px;
+       margin-bottom:10px;display:flex;gap:18px;flex-wrap:wrap;font-size:.92rem">
+    <label><input type="checkbox" class="crit" value="S6" checked>
+      <b>S6</b> — Espace vert</label>
+    <label><input type="checkbox" class="crit" value="S2">
+      <b>S2</b> — Services</label>
+    <label><input type="checkbox" class="crit" value="S7">
+      <b>S7</b> — Transports en commun</label>
+    <span style="color:#888">→ un PDF par critère coché</span>
+  </div>
+  <input type="text" id="address" autofocus
+         placeholder="Adresse de l'actif — ex. 4 rue de la Pompe, 75116 Paris">
+  <input type="text" id="tenant" style="margin-top:10px"
+         placeholder="Locataire / enseigne (optionnel) — ex. Premier Inn">
+  <details style="margin-top:14px" open>
+    <summary style="cursor:pointer;color:#5f6b5f;font-size:.9rem">
+      Service cartographique fiable (recommandé — clé Geoapify gratuite)</summary>
+    <input type="password" id="gakey" style="margin-top:10px"
+           placeholder="Clé API Geoapify (gratuite — myprojects.geoapify.com)">
+    <p class="note" style="margin-top:8px">Sans clé, la page utilise les
+    serveurs OpenStreetMap publics, souvent saturés (quota par adresse IP).
+    Avec une clé Geoapify (gratuite, 2 min : myprojects.geoapify.com →
+    « Sign up » → nouveau projet → copier la clé ; 3 000 requêtes/jour
+    offertes ≈ 200 analyses, sans carte bancaire), la recherche des lieux et
+    les itinéraires piétons passent par leur infrastructure — mêmes données
+    OpenStreetMap, sans saturation. La clé reste enregistrée uniquement dans
+    votre navigateur. Si votre exemplaire du fichier a été fourni avec une
+    clé intégrée, il n'y a rien à saisir.</p>
+  </details>
+  <details style="margin-top:14px">
+    <summary style="cursor:pointer;color:#5f6b5f;font-size:.9rem">
+      Vérification IA du résultat (optionnel — Claude Haiku)</summary>
+    <input type="password" id="apikey" style="margin-top:10px"
+           placeholder="Clé API Anthropic (sk-ant-...)">
+    <p class="note" style="margin-top:8px">La clé reste enregistrée uniquement
+    dans votre navigateur (jamais dans ce fichier ni dans le PDF). Créez-en une
+    sur console.anthropic.com — pensez à y fixer une limite de dépense. Si le
+    champ est vide, le rapport est généré sans vérification IA.
+    Coût : ≈ 0,2 centime par rapport.</p>
+  </details>
+  <button id="go" onclick="run()">Générer le rapport PDF</button>
+  <div id="status"></div>
+  <p class="note">Tout se passe dans votre navigateur : géocodage, recherche de
+  l'espace vert le plus proche et itinéraire piéton via OpenStreetMap, carte de
+  preuve dessinée avec l'itinéraire réel, PDF généré et téléchargé. Aucune
+  installation, aucun serveur.<br><br>
+  Pour une preuve « capture d'écran Google Maps », utiliser la commande
+  <b>/s6 &lt;adresse&gt;</b> dans Claude Code (le navigateur seul ne peut pas
+  capturer Google Maps, par sécurité).</p>
+  <canvas id="map" width="1000" height="640"></canvas>
+</main>
+<script>
+const UA_NOTE = "s6-biodiversite (rapport ESG interne)";
+const TYPES_FR = {park:"Parc public", garden:"Jardin public",
+  nature_reserve:"Réserve naturelle", village_green:"Espace vert communal",
+  recreation_ground:"Terrain de loisirs", common:"Espace vert public",
+  beach:"Plage", beach_resort:"Plage aménagée", wood:"Bois", forest:"Forêt"};
+
+function status(msg, isErr){
+  const el = document.getElementById("status");
+  el.textContent = msg; el.className = isErr ? "err" : "";
+}
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+function havM(la1, lo1, la2, lo2){
+  const r = 6371000, p1 = la1*Math.PI/180, p2 = la2*Math.PI/180,
+        dp = (la2-la1)*Math.PI/180, dl = (lo2-lo1)*Math.PI/180,
+        a = Math.sin(dp/2)**2 + Math.cos(p1)*Math.cos(p2)*Math.sin(dl/2)**2;
+  return 2*r*Math.asin(Math.sqrt(a));
+}
+
+async function fetchTimeout(url, opts = {}, ms = 30000){
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), ms);
+  try{ return await fetch(url, {...opts, signal: ctl.signal}); }
+  finally{ clearTimeout(t); }
+}
+
+// ---- Cache local (navigateur) : les données OSM bougent peu, on les garde
+// 7 jours. Relancer la même adresse (après un échec, ou pour un autre
+// critère) ne consomme alors plus aucun quota serveur.
+const CACHE_TTL_MS = 7*24*3600*1000;
+function hashQ(s){
+  let h = 5381;
+  for(let i = 0; i < s.length; i++) h = (h*33 + s.charCodeAt(i)) >>> 0;
+  return h.toString(36);
+}
+function cacheGet(key){
+  try{
+    const e = JSON.parse(localStorage.getItem(key));
+    if(e && Date.now() - e.t < CACHE_TTL_MS) return e.d;
+  }catch(_){ /* absent ou illisible */ }
+  return null;
+}
+function cacheSet(key, d){
+  const s = JSON.stringify({t: Date.now(), d});
+  if(s.length > 2500000) return;  // trop gros pour localStorage : tant pis
+  try{ localStorage.setItem(key, s); }
+  catch(_){
+    // stockage plein : on purge notre propre cache carto et on retente
+    for(const k of Object.keys(localStorage))
+      if(k.startsWith("esgov:")) localStorage.removeItem(k);
+    try{ localStorage.setItem(key, s); }catch(_2){ /* abandon silencieux */ }
+  }
+}
+
+const VAGUE_TYPES = ["city","town","village","suburb","neighbourhood","quarter",
+  "postcode","administrative","county","state","municipality","region"];
+
+async function geocode(addr){
+  // API Adresse de l'État (adresse.data.gouv.fr) : gratuite, rapide, sans
+  // quota — idéale pour les actifs français. Repli Nominatim (monde entier).
+  try{
+    const ub = "https://api-adresse.data.gouv.fr/search/?limit=1&q="
+               + encodeURIComponent(addr);
+    const rb = await (await fetchTimeout(ub, {}, 8000)).json();
+    const f = (rb.features || [])[0];
+    if(f && f.properties.score >= 0.4){
+      const p = f.properties;
+      return {lat: f.geometry.coordinates[1], lon: f.geometry.coordinates[0],
+              vague: p.type === "municipality" || p.type === "locality",
+              scale: p.type === "housenumber" ? "numéro" : p.type};
+    }
+  }catch(e){ /* hors de France ou API indisponible : Nominatim ci-dessous */ }
+  const u = "https://nominatim.openstreetmap.org/search?format=json&limit=1&q="
+            + encodeURIComponent(addr);
+  const res = await (await fetchTimeout(u)).json();
+  if(!res.length) throw new Error("Adresse introuvable : " + addr);
+  const r = res[0];
+  // Adresse résolue à l'échelle d'un quartier/ville = point de départ douteux.
+  // (Nominatim classe les adresses au numéro en place/house : seul le type
+  // est fiable pour juger la granularité.)
+  const vague = VAGUE_TYPES.includes(r.type) || r.class === "boundary";
+  return {lat:+r.lat, lon:+r.lon, vague, scale: r.type || r.class || "?"};
+}
+
+// Localise un locataire/enseigne autour du point (large si adresse vague).
+async function findTenant(name, lat, lon, radius){
+  const dLat = radius/111320, dLon = radius/(111320*Math.cos(lat*Math.PI/180));
+  const viewbox = `${lon-dLon},${lat+dLat},${lon+dLon},${lat-dLat}`;
+  await sleep(1100);  // politique d'usage Nominatim : 1 requête/seconde
+  const u = "https://nominatim.openstreetmap.org/search?format=json&limit=3"
+    + "&bounded=1&viewbox=" + encodeURIComponent(viewbox)
+    + "&q=" + encodeURIComponent(name);
+  const res = await (await fetchTimeout(u)).json();
+  if(!res.length) return null;
+  return {lat:+res[0].lat, lon:+res[0].lon,
+          label: res[0].name || name,
+          crow: havM(lat, lon, +res[0].lat, +res[0].lon)};
+}
+
+// Les serveurs Overpass publics sont parfois surchargés : course échelonnée
+// sur plusieurs instances, la première réponse valide gagne. private.coffee
+// et kumi.systems en tête : les miroirs overpass-api.de refusent (CORS) les
+// requêtes d'une page ouverte en fichier local (origine null) — le mode
+// d'usage normal de cette page.
+const OVERPASS = ["https://overpass.private.coffee/api/interpreter",
+                  "https://overpass.kumi.systems/api/interpreter",
+                  "https://overpass-api.de/api/interpreter",
+                  "https://lz4.overpass-api.de/api/interpreter",
+                  "https://z.overpass-api.de/api/interpreter"];
+
+// Filtres partagés entre la requête mutualisée (prefetchAll) et les
+// requêtes individuelles de repli de chaque critère. Un espace « praticable »
+// inclut plages et bois en accès libre (actifs littoraux : la plage est
+// souvent l'espace vert évident).
+const GREEN_KINDS = "park|garden|nature_reserve|recreation_ground|village_green|common|beach_resort";
+const GREEN_RE = new RegExp(`^(${GREEN_KINDS})$`);
+const GREEN_LANDUSE = /^(village_green|recreation_ground|forest)$/;
+const GREEN_NATURAL = /^(beach|wood)$/;
+const S2_AMENITY = "restaurant|fast_food|cafe|bar|pub|fuel|school|kindergarten|college|university|bank|doctors|clinic|hospital|pharmacy";
+const S2_SHOP = "supermarket|convenience|bakery|butcher|greengrocer|clothes|shoes|hairdresser|florist|books|chemist|optician|hardware|doityourself|department_store|mall|general";
+const S2_TOURISM = "hotel|guest_house";
+
+// Une SEULE requête Overpass pour tous les critères cochés : le quota des
+// serveurs publics est compté par requête et par adresse IP (tout un bureau
+// partage la même) — mutualiser divise la consommation par ~6, et le cache
+// local fait le reste. Chaque critère filtre ensuite sa part côté client.
+async function prefetchAll(lat, lon, chosen){
+  const parts = [];
+  if(chosen.includes("S6"))
+    parts.push(`nwr["leisure"~"^(${GREEN_KINDS})$"](around:1200,${lat},${lon});`,
+      `nwr["landuse"~"^(village_green|recreation_ground|forest)$"](around:1200,${lat},${lon});`,
+      `nwr["natural"~"^(beach|wood)$"](around:1200,${lat},${lon});`);
+  if(chosen.includes("S2"))
+    parts.push(`nwr["amenity"~"^(${S2_AMENITY})$"](around:1200,${lat},${lon});`,
+      `nwr["shop"~"^(${S2_SHOP})$"](around:1200,${lat},${lon});`,
+      `nwr["tourism"~"^(${S2_TOURISM})$"](around:1200,${lat},${lon});`);
+  if(chosen.includes("S7"))
+    parts.push(`node["highway"="bus_stop"](around:1000,${lat},${lon});`,
+      `node["railway"~"^(tram_stop|station|halt)$"](around:1000,${lat},${lon});`,
+      `node["amenity"~"^(bus_station|ferry_terminal)$"](around:1000,${lat},${lon});`);
+  let q = `[out:json][timeout:30];\n(\n  ${parts.join("\n  ")}\n);\nout body center bb;`;
+  if(chosen.includes("S7"))
+    q += `\nrel["route"~"^(${Object.keys(ROUTE_MODES).join("|")})$"](around:1000,${lat},${lon});\nout tags;`;
+  // Pas de second essai ici : si la requête mutualisée échoue, chaque
+  // critère a son propre repli — inutile de faire patienter deux fois.
+  try{ return await overpassQuery(q, 35000, true); }
+  catch(e){ return null; }
+}
+
+// ---- Geoapify (optionnel, clé gratuite) : mêmes données OpenStreetMap,
+// servies par une infrastructure sans quota partagé par IP. Chaque fonction
+// l'essaie d'abord si une clé est fournie, et retombe sur les serveurs
+// OSM publics en cas d'échec — la page ne peut donc jamais marcher MOINS
+// bien avec une clé.
+// Clé Geoapify intégrée au fichier (optionnel) : renseignez-la ici avant de
+// distribuer la page à l'équipe — plus rien à saisir. Le champ de la page
+// permet toujours de la remplacer. Ne JAMAIS committer une vraie clé dans
+// le dépôt : remplir uniquement la copie distribuée.
+const DEFAULT_GA_KEY = "";
+
+// Vérifiée en début d'analyse : false = clé refusée par Geoapify (401…),
+// on repasse alors explicitement sur les serveurs publics, avec un
+// avertissement visible — jamais de bascule silencieuse.
+let GA_OK = null;
+
+function gaKey(){
+  if(GA_OK === false) return "";
+  const el = document.getElementById("gakey");
+  return (el && el.value.trim()) || DEFAULT_GA_KEY;
+}
+
+async function gaPlaces(lat, lon, radius, categories, limit){
+  const u = "https://api.geoapify.com/v2/places?categories=" + categories
+    + `&filter=circle:${lon},${lat},${Math.round(radius)}&limit=${limit||100}`
+    + "&apiKey=" + encodeURIComponent(gaKey());
+  const res = await (await fetchTimeout(u, {}, 20000)).json();
+  if(res.error || res.statusCode >= 400)
+    throw new Error(res.message || res.error || "erreur Geoapify");
+  return (res.features || []).map(f => {
+    const pr = f.properties || {};
+    return {raw: (pr.datasource && pr.datasource.raw) || {},
+            name: pr.name || null, lat: pr.lat, lon: pr.lon,
+            categories: pr.categories || [], id: pr.place_id};
+  }).filter(p => p.lat !== undefined && p.lat !== null);
+}
+
+// Point du contour d'un lieu Geoapify le plus proche de l'actif (l'API
+// Places ne renvoie qu'un point, souvent le centre — le centre d'une plage
+// de 3 km peut être à 1,2 km quand son bord est à 400 m).
+async function gaOutlinePoint(gaId, lat, lon){
+  const u = "https://api.geoapify.com/v2/place-details?id="
+    + encodeURIComponent(gaId) + "&apiKey=" + encodeURIComponent(gaKey());
+  const res = await (await fetchTimeout(u, {}, 15000)).json();
+  const pts = [];
+  const walk = c => {
+    if(Array.isArray(c) && typeof c[0] === "number")
+      pts.push({lat: c[1], lon: c[0]});
+    else if(Array.isArray(c)) c.forEach(walk);
+  };
+  for(const f of res.features || [])
+    if(f.geometry) walk(f.geometry.coordinates);
+  if(pts.length < 2) return null;  // 1 seul point = simple centre
+  let best = null, bd = Infinity;
+  for(const p of pts){
+    const d = havM(lat, lon, p.lat, p.lon);
+    if(d < bd){ bd = d; best = p; }
+  }
+  return best;
+}
+
+async function gaGreenSpaces(lat, lon, radius){
+  const feats = await gaPlaces(lat, lon, radius,
+    "leisure.park,national_park,beach", 50);
+  const seen = {};
+  for(const p of feats){
+    const t = p.raw;
+    if(["private","no","customers"].includes(t.access)) continue;
+    const kind = t.leisure || t.natural || t.landuse ||
+                 (p.categories.includes("beach") ? "beach" : "");
+    const s = {name: p.name || t.name || "Espace vert (sans nom OSM)",
+      type: TYPES_FR[kind] || "Espace vert",
+      lat: p.lat, lon: p.lon, named: !!(p.name || t.name),
+      crow: havM(lat, lon, p.lat, p.lon), bbox: null, gaId: p.id};
+    if(!(s.name in seen) || s.crow < seen[s.name].crow) seen[s.name] = s;
+  }
+  const list = Object.values(seen)
+    .sort((a,b)=>(a.named===b.named)?a.crow-b.crow:(a.named?-1:1));
+  // Ramener les candidats de tête à leur bord réel AVANT la sélection,
+  // sinon un grand parc/une plage perd face à une pelouse lointaine.
+  await Promise.all(list.slice(0, 6).map(async s => {
+    try{
+      const p = await gaOutlinePoint(s.gaId, lat, lon);
+      if(p){ s.lat = p.lat; s.lon = p.lon; s.crow = havM(lat, lon, p.lat, p.lon); }
+    }catch(e){ /* centre conservé */ }
+  }));
+  return list.sort((a,b)=>(a.named===b.named)?a.crow-b.crow:(a.named?-1:1));
+}
+
+// Catégorie d'un lieu Geoapify : d'abord les tags OSM bruts (pas toujours
+// fournis), sinon la taxonomie Geoapify. Le générique « commercial » doit
+// rester en dernier.
+const GA_CAT_LABEL = [
+  ["catering.restaurant", "Restaurant"], ["catering.fast_food", "Restaurant"],
+  ["catering.cafe", "Café"], ["catering.bar", "Bar"], ["catering.pub", "Bar"],
+  ["accommodation.hotel", "Hôtel"], ["accommodation.guest_house", "Hôtel"],
+  ["commercial.supermarket", "Supermarché"],
+  ["commercial.convenience", "Supermarché"],
+  ["commercial.books", "Librairie"],
+  ["education.school", "École"], ["education.kindergarten", "École"],
+  ["education.college", "École"], ["education.university", "École"],
+  ["healthcare", "Médecin / santé"],
+  ["service.financial", "Banque"],
+  ["commercial", "Commerce"],
+];
+function gaCategorize(p){
+  const c1 = categorize(p.raw);
+  if(c1) return c1;
+  for(const [prefix, label] of GA_CAT_LABEL)
+    for(const c of p.categories)
+      if(c === prefix || c.startsWith(prefix + ".")) return label;
+  return null;
+}
+
+async function greenSpaces(lat, lon, radius, pre){
+  if(gaKey()){
+    try{
+      const spaces = await gaGreenSpaces(lat, lon, radius);
+      if(spaces.length) return {spaces, degraded: false};
+    }catch(e){ /* repli sur les serveurs OSM publics ci-dessous */ }
+  }
+  const q = `[out:json][timeout:25];
+(
+  nwr["leisure"~"^(${GREEN_KINDS})$"](around:${radius},${lat},${lon});
+  nwr["landuse"~"^(village_green|recreation_ground|forest)$"](around:${radius},${lat},${lon});
+  nwr["natural"~"^(beach|wood)$"](around:${radius},${lat},${lon});
+);
+out body center bb;`;
+  const res = pre || await overpassQuery(q);
+  if(!res){
+    return {spaces: await nominatimParks(lat, lon, radius), degraded: true};
+  }
+  const seen = {};
+  for(const el of res.elements||[]){
+    const t = el.tags||{};
+    // (réponse mutualisée : ne garder ici que les espaces verts)
+    if(!GREEN_RE.test(t.leisure||"") && !GREEN_LANDUSE.test(t.landuse||"") &&
+       !GREEN_NATURAL.test(t.natural||"")) continue;
+    if(["private","no","customers"].includes(t.access)) continue;
+    const la = el.lat ?? el.center?.lat
+      ?? (el.bounds && (el.bounds.minlat + el.bounds.maxlat) / 2);
+    const lo = el.lon ?? el.center?.lon
+      ?? (el.bounds && (el.bounds.minlon + el.bounds.maxlon) / 2);
+    if(la === undefined || la === null) continue;
+    // Cible = point du parc le plus proche de l'actif (bord de l'emprise),
+    // pas le centre : l'entree d'un grand parc peut etre a 200 m quand son
+    // centre est a 1,5 km.
+    let tla = +la, tlo = +lo;
+    // Clamp au bord de l'emprise : toujours quand l'actif est HORS de la
+    // bbox (une plage de 3 km se mesure à son bord, pas à son milieu) ;
+    // quand l'actif est DANS la bbox, seulement si elle est compacte (la
+    // bbox d'un bois géant peut contenir l'actif -> fausse distance nulle)
+    if(el.bounds){
+      const b = el.bounds,
+            inside = b.minlat <= lat && lat <= b.maxlat
+                  && b.minlon <= lon && lon <= b.maxlon;
+      if(!inside || havM(b.minlat, b.minlon, b.maxlat, b.maxlon) <= 2000){
+        tla = Math.min(Math.max(lat, b.minlat), b.maxlat);
+        tlo = Math.min(Math.max(lon, b.minlon), b.maxlon);
+      }
+    }
+    const s = {name:t.name||"Espace vert (sans nom OSM)",
+      type:TYPES_FR[t.leisure||t.natural||t.landuse]||"Espace vert",
+      lat:tla, lon:tlo, named:!!t.name, crow:havM(lat,lon,tla,tlo),
+      bbox: el.bounds || null, osmType: el.type, osmId: el.id};
+    if(!(s.name in seen) || s.crow < seen[s.name].crow) seen[s.name]=s;
+  }
+  return {spaces: Object.values(seen)
+    .sort((a,b)=>(a.named===b.named)?a.crow-b.crow:(a.named?-1:1)),
+    degraded: false};
+}
+
+// Plan B quand Overpass est saturé : recherche bornée de parcs/jardins via
+// Nominatim (moins complet, mais toujours disponible).
+async function nominatimParks(lat, lon, radius){
+  status("2/4 — Serveurs Overpass saturés, recherche alternative (Nominatim)…");
+  const dLat = radius/111320,
+        dLon = radius/(111320*Math.cos(lat*Math.PI/180)),
+        viewbox = `${lon-dLon},${lat+dLat},${lon+dLon},${lat-dLat}`;
+  const seen = {};
+  for(const term of ["parc", "jardin public", "square", "plage"]){
+    try{
+      const u = "https://nominatim.openstreetmap.org/search?format=json&limit=10"
+        + "&bounded=1&viewbox=" + encodeURIComponent(viewbox)
+        + "&q=" + encodeURIComponent(term);
+      for(const r of await (await fetchTimeout(u)).json()){
+        if(!["leisure","landuse","natural"].includes(r.class)) continue;
+        // Uniquement le vrai nom OSM : le début de display_name est le nom du
+        // quartier/district, pas celui du parc (piège des parcs sans nom).
+        const name = r.name || "Espace vert (sans nom OSM)";
+        let tla = +r.lat, tlo = +r.lon, bbox = null;
+        if(r.boundingbox){
+          bbox = {minlat:+r.boundingbox[0], maxlat:+r.boundingbox[1],
+                  minlon:+r.boundingbox[2], maxlon:+r.boundingbox[3]};
+          const inside = bbox.minlat <= lat && lat <= bbox.maxlat
+                      && bbox.minlon <= lon && lon <= bbox.maxlon;
+          if(!inside
+             || havM(bbox.minlat, bbox.minlon, bbox.maxlat, bbox.maxlon) <= 2000){
+            tla = Math.min(Math.max(lat, bbox.minlat), bbox.maxlat);
+            tlo = Math.min(Math.max(lon, bbox.minlon), bbox.maxlon);
+          }
+        }
+        const s = {name, type: TYPES_FR[r.type] || "Espace vert",
+          lat:tla, lon:tlo, named:!!r.name, bbox,
+          crow:havM(lat,lon,tla,tlo),
+          osmType: r.osm_type, osmId: r.osm_id};
+        if(s.crow <= radius && (!(name in seen) || s.crow < seen[name].crow))
+          seen[name] = s;
+      }
+    }catch(e){ /* terme suivant */ }
+    await sleep(1100);  // politique d'usage Nominatim : 1 requête/seconde
+  }
+  return Object.values(seen).sort((a,b)=>a.crow-b.crow);
+}
+
+// Cible l'entrée du parc si OSM la connaît, sinon le point de son contour
+// réel le plus proche de l'actif (le coin d'emprise peut tomber du mauvais
+// côté du parc).
+async function refineParkTarget(park, asset){
+  // Via Geoapify : le contour du lieu vient de l'API Place Details.
+  if(gaKey() && park.gaId){
+    try{
+      const p = await gaOutlinePoint(park.gaId, asset.lat, asset.lon);
+      if(p) return {...p, entrance: false};
+    }catch(e){ /* repli Overpass ci-dessous */ }
+  }
+  if(park.osmType !== "way" || !park.osmId) return null;
+  const q = `[out:json][timeout:15];way(${park.osmId})->.p;
+.p out geom;node(w.p)["entrance"];out body;`;
+  const res = await overpassQuery(q);
+  if(!res) return null;
+  const entrances = [], outline = [];
+  for(const el of res.elements || []){
+    if(el.type === "node" && el.lat !== undefined)
+      entrances.push({lat:+el.lat, lon:+el.lon});
+    for(const g of el.geometry || []) outline.push({lat:+g.lat, lon:+g.lon});
+  }
+  const pts = entrances.length ? entrances : outline;
+  if(!pts.length) return null;
+  let bestP = null, bestD = Infinity;
+  for(const p of pts){
+    const d = havM(asset.lat, asset.lon, p.lat, p.lon);
+    if(d < bestD){ bestD = d; bestP = p; }
+  }
+  return {...bestP, entrance: entrances.length > 0};
+}
+
+// ---- Critère S2 : services à moins d'1 km ----
+function categorize(t){
+  const a = t.amenity, s = t.shop, to = t.tourism;
+  if(a === "restaurant" || a === "fast_food") return "Restaurant";
+  if(a === "cafe") return "Café";
+  if(a === "bar" || a === "pub") return "Bar";
+  if(to === "hotel" || to === "guest_house") return "Hôtel";
+  if(s === "supermarket" || s === "convenience") return "Supermarché";
+  if(a === "fuel") return "Station-service";
+  if(["school","kindergarten","college","university"].includes(a)) return "École";
+  if(a === "bank") return "Banque";
+  if(["doctors","clinic","hospital","pharmacy"].includes(a)) return "Médecin / santé";
+  if(s === "books") return "Librairie";
+  if(s) return "Commerce";
+  return null;
+}
+
+async function findServices(lat, lon, radius, pre){
+  if(gaKey()){
+    try{
+      // Une requête PAR famille : l'API Places ne renvoie qu'une famille
+      // quand on en combine plus de deux (constaté en test réel).
+      const groups = ["catering", "commercial",
+                      "accommodation.hotel,accommodation.guest_house",
+                      "education", "healthcare"];
+      const feats = (await Promise.all(groups.map(g =>
+        gaPlaces(lat, lon, radius, g, 100).catch(() => [])))).flat();
+      const out = [];
+      for(const p of feats){
+        const cat = gaCategorize(p), nm = p.name || p.raw.name;
+        if(!cat || !nm) continue;
+        out.push({name: nm, cat, lat: p.lat, lon: p.lon,
+                  crow: havM(lat, lon, p.lat, p.lon)});
+      }
+      if(out.length) return {services: out, degraded: false};
+    }catch(e){ /* repli sur les serveurs OSM publics ci-dessous */ }
+  }
+  const q = `[out:json][timeout:25];
+(
+  nwr["amenity"~"^(${S2_AMENITY})$"](around:${radius},${lat},${lon});
+  nwr["shop"~"^(${S2_SHOP})$"](around:${radius},${lat},${lon});
+  nwr["tourism"~"^(${S2_TOURISM})$"](around:${radius},${lat},${lon});
+);
+out body center;`;
+  const res = pre || await overpassQuery(q);
+  const out = [];
+  if(res){
+    for(const el of res.elements || []){
+      const t = el.tags || {}, cat = categorize(t);
+      if(!cat || !t.name) continue;  // un service sans nom ne prouve rien
+      const la = el.lat ?? el.center?.lat, lo = el.lon ?? el.center?.lon;
+      if(la === undefined) continue;
+      out.push({name:t.name, cat, lat:+la, lon:+lo,
+                crow:havM(lat,lon,+la,+lo)});
+    }
+    return {services: out, degraded: false};
+  }
+  status("2/4 — Serveurs Overpass saturés, recherche alternative (Nominatim)…");
+  const terms = [["restaurant","Restaurant"],["cafe","Café"],["hotel","Hôtel"],
+    ["supermarket","Supermarché"],["school","École"],["bank","Banque"],
+    ["pharmacy","Médecin / santé"]];
+  const dLat = radius/111320, dLon = radius/(111320*Math.cos(lat*Math.PI/180));
+  const viewbox = `${lon-dLon},${lat+dLat},${lon+dLon},${lat-dLat}`;
+  for(const [term, cat] of terms){
+    try{
+      const u = "https://nominatim.openstreetmap.org/search?format=json&limit=5"
+        + "&bounded=1&viewbox=" + encodeURIComponent(viewbox)
+        + "&q=" + encodeURIComponent(term);
+      for(const r of await (await fetchTimeout(u)).json()){
+        if(!r.name) continue;
+        const c = havM(lat, lon, +r.lat, +r.lon);
+        if(c <= radius) out.push({name:r.name, cat, lat:+r.lat, lon:+r.lon, crow:c});
+      }
+    }catch(e){ /* terme suivant */ }
+    await sleep(1100);
+  }
+  return {services: out, degraded: true};
+}
+
+async function walkRoute(a, b){
+  if(gaKey()){
+    try{
+      const u = "https://api.geoapify.com/v1/routing?waypoints="
+        + `${a.lat},${a.lon}|${b.lat},${b.lon}&mode=walk`
+        + "&apiKey=" + encodeURIComponent(gaKey());
+      const res = await (await fetchTimeout(u, {}, 20000)).json();
+      const f = res.features[0], p = f.properties;
+      let coords = [];
+      if(f.geometry.type === "LineString") coords = f.geometry.coordinates;
+      else for(const seg of f.geometry.coordinates) coords.push(...seg);
+      return {m: Math.round(p.distance),
+              min: Math.max(1, Math.round(p.time/60)), coords,
+              src: "itinéraire piéton Geoapify (données OpenStreetMap)"};
+    }catch(e){ /* repli sur les routeurs OSM publics ci-dessous */ }
+  }
+  for(const base of ["https://routing.openstreetmap.de/routed-foot/route/v1/foot",
+                     "https://router.project-osrm.org/route/v1/foot"]){
+    try{
+      const u = `${base}/${a.lon},${a.lat};${b.lon},${b.lat}?overview=full&geometries=geojson`;
+      const res = await (await fetchTimeout(u, {}, 20000)).json();
+      const r = res.routes[0];
+      return {m:Math.round(r.distance), min:Math.max(1,Math.round(r.duration/60)),
+              coords:r.geometry.coordinates,
+              src:"itinéraire piéton OSM ("+base.split("/")[2]+")"};
+    }catch(e){ /* essai suivant */ }
+  }
+  const d = Math.round(havM(a.lat,a.lon,b.lat,b.lon)*1.3);
+  return {m:d, min:Math.max(1,Math.round(d/80)),
+          coords:[[a.lon,a.lat],[b.lon,b.lat]],
+          src:"ESTIMATION : vol d'oiseau ×1,3 (routeur piéton injoignable)"};
+}
+
+// Contrôles automatiques gratuits (règles déterministes, aucun service payant).
+// Retourne une liste d'avertissements ; vide = rien à signaler.
+function sanityChecks(asset, best){
+  const w = [], p = best.park, r = best.route;
+  if(/\b(DED|district|canton|arrondissement|circonscription|électoral|\b(19|20)\d{2}\b)\b/i
+     .test(p.name))
+    w.push(`le nom « ${p.name} » ressemble à un découpage administratif, `
+           + `pas à un parc — à vérifier via le lien Google Maps`);
+  const speed = r.m / Math.max(r.min, 1) / 16.667;  // km/h
+  if(speed > 6.5 || speed < 2.5)
+    w.push(`vitesse de marche implicite anormale (${speed.toFixed(1)} km/h)`);
+  const crow = havM(asset.lat, asset.lon, p.lat, p.lon);
+  if(r.m < crow * 0.9)
+    w.push(`distance à pied (${r.m} m) inférieure au vol d'oiseau `
+           + `(${Math.round(crow)} m) — incohérent`);
+  if(r.m > crow * 3 && crow > 100)
+    w.push(`itinéraire très détourné (${r.m} m pour ${Math.round(crow)} m `
+           + `à vol d'oiseau) — à vérifier`);
+  if(r.src.startsWith("ESTIMATION"))
+    w.push("distance estimée (routeur piéton indisponible) — à confirmer "
+           + "via le lien Google Maps");
+  if(r.m >= 900 && r.m <= 1100)
+    w.push(`distance de ${r.m} m proche du seuil d'1 km — vérification `
+           + `manuelle recommandée`);
+  if(p.bbox){
+    const wM = havM(p.bbox.minlat, p.bbox.minlon, p.bbox.minlat, p.bbox.maxlon);
+    const hM = havM(p.bbox.minlat, p.bbox.minlon, p.bbox.maxlat, p.bbox.minlon);
+    if(wM * hM > 0 && wM * hM < 2500)
+      w.push(`emprise très réduite (~${Math.round(wM*hM)} m²) — `
+             + `praticabilité comme espace vert à vérifier`);
+    const diag = Math.hypot(wM, hM);
+    if(r.m > 1000 && r.m - diag/2 <= 1000)
+      w.push("grand parc : distance mesurée jusqu'à son centre — l'entrée "
+             + "la plus proche est probablement sous le seuil d'1 km");
+  }
+  return w;
+}
+
+// Vérification optionnelle du résultat par Claude Haiku, directement depuis
+// le navigateur (en-tête CORS dédié de l'API Anthropic). Retourne
+// {coherent, confiance, remarque} ou null si pas de clé / échec.
+async function verifyWithClaude(addr, asset, best, others){
+  const key = document.getElementById("apikey").value.trim();
+  if(!key) return null;
+  status("Vérification du résultat par Claude (Haiku)…");
+  const prompt =
+`Tu vérifies le résultat d'un outil automatique pour un critère ESG immobilier
+(S6 : espace vert praticable à moins d'1 km à pied de l'actif).
+
+Résultat à vérifier :
+- Actif : ${addr} (${asset.lat.toFixed(5)}, ${asset.lon.toFixed(5)})
+- Espace vert retenu : ${best.park.name} (${best.park.type}), coordonnées ${best.park.lat.toFixed(5)}, ${best.park.lon.toFixed(5)}
+- Distance à pied : ${best.route.m} m, ${best.route.min} min (source : ${best.route.src})
+- Autres candidats écartés : ${others || "aucun"}
+
+Contrôles : (1) le nom retenu désigne-t-il vraisemblablement un vrai espace
+vert public praticable — et non un découpage administratif (district, canton,
+"DED"), un lieu-dit ou un site privé ? (2) la distance et le temps sont-ils
+plausibles et cohérents entre eux (marche ≈ 4-5 km/h) ? (3) le verdict
+(critère validé si distance ≤ 1000 m) est-il correct ? Réponds en français.`;
+  try{
+    const resp = await fetchTimeout("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": key,
+        "anthropic-version": "2023-06-01",
+        "anthropic-dangerous-direct-browser-access": "true",
+      },
+      body: JSON.stringify({
+        model: "claude-haiku-4-5",
+        max_tokens: 400,
+        output_config: {format: {type: "json_schema", schema: {
+          type: "object",
+          properties: {
+            coherent: {type: "boolean"},
+            confiance: {type: "string", enum: ["haute", "moyenne", "basse"]},
+            remarque: {type: "string"},
+          },
+          required: ["coherent", "confiance", "remarque"],
+          additionalProperties: false,
+        }}},
+        messages: [{role: "user", content: prompt}],
+      }),
+    }, 30000);
+    if(resp.status === 401) throw new Error("clé API invalide");
+    if(!resp.ok) throw new Error("HTTP " + resp.status);
+    const data = await resp.json();
+    const txt = (data.content || []).find(b => b.type === "text");
+    if(!txt) throw new Error("réponse sans texte (stop: " + data.stop_reason + ")");
+    localStorage.setItem("s6_anthropic_key", key);
+    return JSON.parse(txt.text);
+  }catch(e){
+    status("Vérification IA indisponible (" + e.message + ") — le rapport "
+           + "est généré sans. Génération du PDF…");
+    return null;
+  }
+}
+
+const lon2x = (lon,z)=>(lon+180)/360*2**z;
+const lat2y = (lat,z)=>{const r=lat*Math.PI/180;
+  return (1-Math.log(Math.tan(r)+1/Math.cos(r))/Math.PI)/2*2**z;};
+
+function loadTile(z,x,y){
+  return new Promise(res=>{
+    const im = new Image(); im.crossOrigin = "anonymous";
+    im.onload = ()=>res(im); im.onerror = ()=>res(null);
+    im.src = `https://tile.openstreetmap.org/${z}/${x}/${y}.png`;
+  });
+}
+
+// Fond de carte commun : tuiles OSM cadrées sur un nuage de points.
+async function baseMap(pts){
+  const cv = document.getElementById("map"), ctx = cv.getContext("2d"),
+        W = cv.width, H = cv.height;
+  let z = 18;
+  for(; z > 3; z--){
+    const xs = pts.map(p=>lon2x(p[0],z)), ys = pts.map(p=>lat2y(p[1],z));
+    if((Math.max(...xs)-Math.min(...xs))*256 <= W-140 &&
+       (Math.max(...ys)-Math.min(...ys))*256 <= H-140) break;
+  }
+  const xs = pts.map(p=>lon2x(p[0],z)), ys = pts.map(p=>lat2y(p[1],z));
+  const cx = (Math.max(...xs)+Math.min(...xs))/2,
+        cy = (Math.max(...ys)+Math.min(...ys))/2;
+  const px = (lon,lat)=>[(lon2x(lon,z)-cx)*256+W/2, (lat2y(lat,z)-cy)*256+H/2];
+
+  ctx.fillStyle = "#e8eaed"; ctx.fillRect(0,0,W,H);
+  const x0 = Math.floor(cx - W/512), x1 = Math.floor(cx + W/512),
+        y0 = Math.floor(cy - H/512), y1 = Math.floor(cy + H/512);
+  const jobs = [];
+  for(let x=x0;x<=x1;x++) for(let y=y0;y<=y1;y++)
+    jobs.push(loadTile(z,x,y).then(im=>{
+      if(im) ctx.drawImage(im,(x-cx)*256+W/2,(y-cy)*256+H/2);
+    }));
+  await Promise.all(jobs);
+  return {cv, ctx, px, W, H};
+}
+
+function strokeRoute(ctx, px, coords, color){
+  ctx.strokeStyle = color; ctx.lineWidth = 6;
+  ctx.lineJoin = ctx.lineCap = "round";
+  ctx.beginPath();
+  coords.forEach((c,i)=>{const [x,y]=px(c[0],c[1]);
+    i?ctx.lineTo(x,y):ctx.moveTo(x,y);});
+  ctx.stroke();
+}
+
+function drawMarker(ctx, px, pt, color, num){
+  const [x,y] = px(pt.lon, pt.lat);
+  ctx.beginPath(); ctx.arc(x,y,num?13:10,0,7);
+  ctx.fillStyle = color; ctx.fill();
+  ctx.lineWidth = 3; ctx.strokeStyle = "#fff"; ctx.stroke();
+  if(num){ ctx.fillStyle = "#fff"; ctx.font = "bold 16px sans-serif";
+    ctx.textAlign = "center"; ctx.fillText(num, x, y+6); ctx.textAlign = "start"; }
+}
+
+function drawAttribution(ctx, W, H){
+  ctx.font = "11px sans-serif";
+  const attr = "© OpenStreetMap contributors";
+  const aw = ctx.measureText(attr).width;
+  ctx.fillStyle = "rgba(255,255,255,.75)";
+  ctx.fillRect(W-aw-14, H-20, aw+14, 20);
+  ctx.fillStyle = "#333"; ctx.fillText(attr, W-aw-7, H-6);
+}
+
+async function drawMap(asset, park, route){
+  const pts = [[asset.lon,asset.lat],[park.lon,park.lat],...route.coords];
+  const {cv, ctx, px, W, H} = await baseMap(pts);
+  strokeRoute(ctx, px, route.coords, "#1a73e8");
+  drawMarker(ctx, px, asset, "#d93025");
+  drawMarker(ctx, px, park, "#188038");
+
+  const mid = route.coords[Math.floor(route.coords.length/2)],
+        [mx,my] = px(mid[0],mid[1]),
+        txt = `${route.m} m à pied · ${route.min} min`;
+  ctx.font = "bold 20px sans-serif";
+  const tw = ctx.measureText(txt).width;
+  const bx = Math.min(Math.max(mx-tw/2-12, 8), W-tw-32), by = Math.max(my-52, 8);
+  ctx.fillStyle = "#1a73e8";
+  ctx.beginPath(); ctx.roundRect(bx, by, tw+24, 34, 8); ctx.fill();
+  ctx.fillStyle = "#fff"; ctx.fillText(txt, bx+12, by+24);
+  drawAttribution(ctx, W, H);
+  return cv;
+}
+
+const S2_COLORS = ["#1a73e8", "#188038", "#9333ea"];
+
+// Carte S2 : l'actif + les 3 services numérotés, chacun avec son itinéraire.
+async function drawMapS2(asset, sel){
+  const pts = [[asset.lon,asset.lat]];
+  sel.forEach(it=>{pts.push([it.s.lon,it.s.lat], ...it.route.coords);});
+  const {cv, ctx, px, W, H} = await baseMap(pts);
+  sel.forEach((it,i)=>strokeRoute(ctx, px, it.route.coords,
+                                  S2_COLORS[i%S2_COLORS.length]));
+  drawMarker(ctx, px, asset, "#d93025");
+  sel.forEach((it,i)=>drawMarker(ctx, px, it.s,
+                                 S2_COLORS[i%S2_COLORS.length], String(i+1)));
+  drawAttribution(ctx, W, H);
+  return cv;
+}
+
+function buildPdf(addr, asset, park, route, canvas, verdict, warnings, infos){
+  const {jsPDF} = window.jspdf;
+  const doc = new jsPDF({unit:"mm", format:"a4"});
+  const L = 15, W = 180, today = new Date().toLocaleDateString("fr-FR");
+  const ok = route.m <= 1000, score = ok ? 4 : 0;
+  let y = 16;
+
+  doc.setFont("helvetica","bold"); doc.setFontSize(15);
+  doc.text("Critère S6 — Exposition à la biodiversité", 105, y, {align:"center"});
+  y += 6; doc.setFont("helvetica","normal"); doc.setFontSize(9.5);
+  doc.setTextColor(85);
+  doc.text("Espace vert praticable à moins de 1 km à pied du site", 105, y,
+           {align:"center"});
+  y += 5;
+  doc.text(`Actif : ${addr}   ·   Date de l'analyse : ${today}`, 105, y,
+           {align:"center"});
+  y += 5;
+
+  doc.setFillColor(...(ok ? [24,128,56] : [217,48,37]));
+  doc.rect(L, y, W, 9, "F");
+  doc.setTextColor(255); doc.setFont("helvetica","bold"); doc.setFontSize(10.5);
+  doc.text(`SCORE : ${score} / 4 — Critère ${ok?"validé":"non validé"} — `
+           + `${park.name} à ${route.m} m à pied (${route.min} min)`,
+           105, y+6, {align:"center"});
+  y += 14;
+
+  doc.setTextColor(0); doc.setFontSize(11);
+  doc.text("Fiche récapitulative", L, y); y += 3;
+  const rows = [["Type d'espace vert", park.type], ["Nom", park.name],
+    ["Localisation", `coordonnées OSM : ${park.lat.toFixed(5)}, ${park.lon.toFixed(5)}`],
+    ["Distance à pied", route.m + " m"], ["Temps de marche", route.min + " min"],
+    ["Source", `OpenStreetMap (Nominatim + Overpass) ; ${route.src} ; consulté le ${today}`]];
+  const ctrl = [];
+  if(warnings.length) ctrl.push("ATTENTION : " + warnings.join(" ; "));
+  if(infos && infos.length) ctrl.push(infos.join(" ; "));
+  rows.push(["Contrôles automatiques", ctrl.join(". ")
+    || "RAS — nom, vitesse de marche et distances cohérents"]);
+  if(verdict)
+    rows.push(["Vérification IA",
+      `${verdict.coherent ? "Résultat jugé cohérent" : "INCOHÉRENCE SIGNALÉE"} `
+      + `(confiance ${verdict.confiance}) — ${verdict.remarque} `
+      + `[Claude Haiku, ${today}]`]);
+  doc.setFontSize(8.5);
+  for(const [k,v] of rows){
+    const lines = doc.splitTextToSize(v, 128);
+    const rh = Math.max(7, lines.length*4 + 3);
+    doc.setFillColor(242,242,242); doc.rect(L, y, 45, rh, "FD");
+    doc.rect(L+45, y, W-45, rh);
+    doc.setFont("helvetica","bold"); doc.text(k, L+2, y+4.6);
+    doc.setFont("helvetica","normal"); doc.text(lines, L+47, y+4.6);
+    y += rh;
+  }
+  y += 4;
+  const mapsUrl = `https://www.google.com/maps/dir/${asset.lat},${asset.lon}/`
+                + `${park.lat},${park.lon}/data=!4m2!4m1!3e2`;
+  doc.setFontSize(7); doc.setTextColor(0,0,238);
+  doc.textWithLink("Itinéraire vérifiable (Google Maps) : " + mapsUrl, L, y,
+                   {url: mapsUrl});
+  y += 6;
+
+  doc.setTextColor(0); doc.setFont("helvetica","bold"); doc.setFontSize(11);
+  doc.text(`Preuve — ${park.name} (${route.m} m · ${route.min} min à pied)`, L, y);
+  y += 3;
+  const ih = W * canvas.height / canvas.width;
+  doc.addImage(canvas.toDataURL("image/jpeg", .92), "JPEG", L, y, W, ih);
+  y += ih + 4;
+  doc.setFont("helvetica","normal"); doc.setFontSize(7.5); doc.setTextColor(100);
+  const isEst = route.src.startsWith("ESTIMATION");
+  doc.text(doc.splitTextToSize(isEst
+    ? "Carte OpenStreetMap générée dans le navigateur. Routeur piéton "
+      + "injoignable au moment de l'analyse : tracé direct et distance estimée "
+      + "(vol d'oiseau ×1,3) — à confirmer via le lien Google Maps ci-dessus."
+    : "Carte OpenStreetMap générée dans le navigateur avec l'itinéraire piéton "
+      + "réel. Distance et temps issus de la source citée dans la fiche ; "
+      + "itinéraire vérifiable via le lien Google Maps ci-dessus.", W), L, y);
+  y += 9;
+
+  doc.setTextColor(0); doc.setFont("helvetica","bold"); doc.setFontSize(11);
+  doc.text("Conclusion", L, y); y += 5;
+  doc.setFont("helvetica","normal"); doc.setFontSize(9.5);
+  const concl = ok
+    ? `Un espace vert praticable (${park.name}, ${park.type.toLowerCase()}) se `
+      + `trouve à ${route.m} m à pied du site, sous le seuil de 1 km. `
+      + `Le critère S6 est validé : 4/4.`
+    : `Aucun espace vert praticable n'a été identifié sous le seuil de 1 km à `
+      + `pied (${park.name} est à ${route.m} m). Le critère S6 n'est pas `
+      + `validé : 0/4.`;
+  doc.text(doc.splitTextToSize(concl, W), L, y);
+
+  const slug = addr.normalize("NFD").replace(/[̀-ͯ]/g,"")
+                   .replace(/[^A-Za-z0-9]+/g,"_").replace(/^_|_$/g,"");
+  doc.save(`S6_${slug || "rapport"}.pdf`);
+}
+
+// Rapport S2 : 3 services de catégories différentes sous le seuil d'1 km.
+function buildS2Pdf(addr, asset, sel, canvas, warnings, infos){
+  const {jsPDF} = window.jspdf;
+  const doc = new jsPDF({unit:"mm", format:"a4"});
+  const L = 15, W = 180, today = new Date().toLocaleDateString("fr-FR");
+  const ok = sel.length >= 3, score = ok ? 3 : 0;
+  let y = 16;
+
+  doc.setFont("helvetica","bold"); doc.setFontSize(15);
+  doc.text("Critère S2 — Présence de services", 105, y, {align:"center"});
+  y += 6; doc.setFont("helvetica","normal"); doc.setFontSize(9.5);
+  doc.setTextColor(85);
+  doc.text("Au moins 3 services de catégories différentes à moins de 1 km "
+           + "à pied du site", 105, y, {align:"center"});
+  y += 5;
+  doc.text(`Actif : ${addr}   ·   Date de l'analyse : ${today}`, 105, y,
+           {align:"center"});
+  y += 5;
+
+  doc.setFillColor(...(ok ? [24,128,56] : [217,48,37]));
+  doc.rect(L, y, W, 9, "F");
+  doc.setTextColor(255); doc.setFont("helvetica","bold"); doc.setFontSize(10.5);
+  doc.text(`SCORE : ${score} / 3 — Critère ${ok?"validé":"non validé"} — `
+           + `${sel.length} service(s) de catégories différentes sous le seuil`,
+           105, y+6, {align:"center"});
+  y += 14;
+
+  doc.setTextColor(0); doc.setFontSize(11);
+  doc.text("Services retenus", L, y); y += 3;
+  const rows = sel.map((it,i) =>
+    [`${i+1}. ${it.s.cat}`,
+     `${it.s.name} — ${it.route.m} m · ${it.route.min} min à pied`]);
+  const ctrl = [];
+  if(warnings.length) ctrl.push("ATTENTION : " + warnings.join(" ; "));
+  if(infos.length) ctrl.push(infos.join(" ; "));
+  rows.push(["Contrôles automatiques", ctrl.join(". ") || "RAS"]);
+  rows.push(["Source", "Lieux et itinéraires piétons : " + srcLabel()
+             + ` ; consulté le ${today}`]);
+  doc.setFontSize(8.5);
+  for(const [k,v] of rows){
+    const lines = doc.splitTextToSize(v, 128);
+    const rh = Math.max(7, lines.length*4 + 3);
+    doc.setFillColor(242,242,242); doc.rect(L, y, 45, rh, "FD");
+    doc.rect(L+45, y, W-45, rh);
+    doc.setFont("helvetica","bold"); doc.text(k, L+2, y+4.6);
+    doc.setFont("helvetica","normal"); doc.text(lines, L+47, y+4.6);
+    y += rh;
+  }
+  y += 4;
+  doc.setFontSize(7); doc.setTextColor(0,0,238);
+  sel.forEach((it,i)=>{
+    const u = `https://www.google.com/maps/dir/${asset.lat},${asset.lon}/`
+            + `${it.s.lat},${it.s.lon}/data=!4m2!4m1!3e2`;
+    doc.textWithLink(`Itinéraire vérifiable ${i+1} (${it.s.name}) : ${u}`,
+                     L, y, {url: u});
+    y += 4;
+  });
+  y += 2;
+
+  doc.setTextColor(0); doc.setFont("helvetica","bold"); doc.setFontSize(11);
+  doc.text("Preuve — les 3 itinéraires piétons", L, y); y += 3;
+  const ih = W * canvas.height / canvas.width;
+  doc.addImage(canvas.toDataURL("image/jpeg", .92), "JPEG", L, y, W, ih);
+  y += ih + 4;
+  doc.setFont("helvetica","normal"); doc.setFontSize(7.5); doc.setTextColor(100);
+  doc.text(doc.splitTextToSize(
+    "Carte OpenStreetMap générée dans le navigateur : actif en rouge, "
+    + "services numérotés avec leur itinéraire piéton réel. Distances "
+    + "vérifiables via les liens Google Maps ci-dessus.", W), L, y);
+  y += 9;
+
+  doc.setTextColor(0); doc.setFont("helvetica","bold"); doc.setFontSize(11);
+  doc.text("Conclusion", L, y); y += 5;
+  doc.setFont("helvetica","normal"); doc.setFontSize(9.5);
+  const concl = ok
+    ? `${sel.length} services de catégories différentes se trouvent à moins `
+      + `d'1 km à pied du site : `
+      + sel.map(it=>`${it.s.cat.toLowerCase()} (${it.s.name}, ${it.route.m} m)`)
+           .join(" ; ")
+      + `. Le critère S2 est validé : 3/3.`
+    : `Seulement ${sel.length} service(s) de catégories différentes `
+      + `trouvé(s) à moins d'1 km à pied (minimum requis : 3). `
+      + `Le critère S2 n'est pas validé : 0/3.`;
+  doc.text(doc.splitTextToSize(concl, W), L, y);
+
+  const slug = addr.normalize("NFD").replace(/[̀-ͯ]/g,"")
+                   .replace(/[^A-Za-z0-9]+/g,"_").replace(/^_|_$/g,"");
+  doc.save(`S2_${slug || "rapport"}.pdf`);
+}
+
+// ---- S6 : espace vert à moins d'1 km ----
+// Libellé honnête de la source active (affiché dans les statuts et PDF)
+function srcLabel(){
+  return gaKey() ? "Geoapify — données OpenStreetMap"
+                 : "serveurs OpenStreetMap publics";
+}
+
+async function runS6(addr, asset, infos, preWarnings, pre){
+  status("S6 — Recherche des espaces verts praticables (" + srcLabel() + ")…");
+  const {spaces, degraded} = await greenSpaces(asset.lat, asset.lon, 1200, pre);
+  if(!spaces.length && degraded) throw new Error(
+    "S6 : recherche dégradée (serveurs saturés/quota IP) et aucun espace "
+    + "vert trouvé — réessayez dans 1 à 2 minutes, ne concluez pas 0/4.");
+  if(!spaces.length) throw new Error(
+    "S6 : aucun espace vert recensé par OpenStreetMap sous 1 200 m — "
+    + "vérifiez manuellement (Google Maps) avant d'acter un 0/4.");
+  if(degraded)
+    preWarnings.push("recherche d'espaces verts dégradée (serveurs saturés) "
+      + "— résultat possiblement incomplet, relancer pour confirmer");
+  status("S6 — Calcul des itinéraires piétons réels…");
+  // Un parc nommé sous le seuil d'1 km est préféré à une pelouse anonyme ;
+  // sinon, le plus proche à pied l'emporte.
+  const cands = [...spaces.filter(s=>s.named).slice(0,3),
+                 ...spaces.filter(s=>!s.named).slice(0,3)];
+  const evaluated = [];
+  for(const s of cands){
+    evaluated.push({park:s, route:await walkRoute(asset, s)});
+    await sleep(300);
+  }
+  const byDist = (a,b)=>a.route.m-b.route.m;
+  const anyOk = evaluated.filter(e=>e.route.m<=1000).sort(byDist);
+  const best = evaluated.filter(e=>e.park.named && e.route.m<=1000).sort(byDist)[0]
+            || anyOk[0]
+            || [...evaluated].sort(byDist)[0];
+  // Viser l'entrée (ou le contour) du parc retenu, puis re-mesurer
+  const refined = await refineParkTarget(best.park, asset);
+  if(refined){
+    best.park.lat = refined.lat; best.park.lon = refined.lon;
+    best.route = await walkRoute(asset, best.park);
+    infos.push(refined.entrance
+      ? "Itinéraire visé sur l'entrée du parc (nœud entrance OSM)"
+      : "Itinéraire visé sur le point du contour du parc le plus proche");
+  }
+  // Transparence : espace anonyme encore plus proche que le parc nomme retenu
+  if(anyOk[0] && anyOk[0] !== best && anyOk[0].route.m < best.route.m)
+    infos.push(`NB : un espace vert sans nom OSM existe encore plus près `
+      + `(${anyOk[0].route.m} m) ; le parc nommé est retenu comme preuve `
+      + `plus solide`);
+  if(!best.park.named){
+    // Situer un espace sans nom par géocodage inverse (sans rien inventer).
+    try{
+      const rev = await (await fetchTimeout(
+        "https://nominatim.openstreetmap.org/reverse?format=json&zoom=16"
+        + `&lat=${best.park.lat}&lon=${best.park.lon}`)).json();
+      const a = rev.address || {},
+            loc = a.road || a.neighbourhood || a.suburb || a.village || a.town;
+      if(loc) best.park.name = `Espace vert public (près de ${loc})`;
+    }catch(e){ /* on garde le libellé générique */ }
+  }
+  const others = evaluated.filter(e => e !== best).slice(0, 4)
+    .map(e => `${e.park.name} (${e.route.m} m)`).join(", ");
+  const warnings = preWarnings.concat(sanityChecks(asset, best));
+  const verdict = await verifyWithClaude(addr, asset, best, others);
+  status("S6 — Dessin de la carte et génération du PDF…");
+  const canvas = await drawMap(asset, best.park, best.route);
+  buildPdf(addr, asset, best.park, best.route, canvas, verdict, warnings, infos);
+  return `S6 : ${best.route.m<=1000?4:0}/4 (${best.park.name}, `
+       + `${best.route.m} m)`
+       + (warnings.length ? ` ⚠${warnings.length}` : "");
+}
+
+// ---- S2 : 3 services à moins d'1 km ----
+async function runS2(addr, asset, infos, preWarnings, pre){
+  status("S2 — Recherche des services (" + srcLabel() + ")…");
+  const {services: svcs, degraded} =
+    await findServices(asset.lat, asset.lon, 1200, pre);
+  if(!svcs.length) throw new Error(
+    "S2 : aucun service nommé trouvé dans un rayon de 1 200 m (OSM"
+    + (degraded ? ", recherche dégradée : serveurs saturés — réessayez "
+                + "dans quelques minutes" : "") + ").");
+  status("S2 — Itinéraires piétons vers les services…");
+  const byCat = {};
+  for(const s of svcs)
+    if(!(s.cat in byCat) || s.crow < byCat[s.cat].crow) byCat[s.cat] = s;
+  const ordered = Object.values(byCat).sort((a,b)=>a.crow-b.crow);
+  const sel = [];
+  for(const s of ordered){
+    if(sel.length >= 3) break;
+    const r = await walkRoute(asset, s); await sleep(300);
+    if(r.m <= 1000){
+      sel.push({s, route:r});
+      if(r.m >= 900)
+        preWarnings.push(`${s.name} à ${r.m} m — proche du seuil d'1 km`);
+    }
+  }
+  if(degraded && sel.length < 3)
+    preWarnings.push("recherche de services DÉGRADÉE (serveurs "
+      + "cartographiques saturés) : le score peut être sous-évalué — "
+      + "relancer l'analyse avant de conclure");
+  if(!sel.length && !degraded) throw new Error(
+    "S2 : aucun service à moins d'1 km à pied — critère non validé (0/3).");
+  if(!sel.length) throw new Error(
+    "S2 : serveurs cartographiques publics momentanément saturés (quota par "
+    + "adresse IP) et aucun service trouvé — réessayez dans 1 à 2 minutes "
+    + "plutôt que de conclure 0/3.");
+  status("S2 — Dessin de la carte et génération du PDF…");
+  const canvas2 = await drawMapS2(asset, sel);
+  buildS2Pdf(addr, asset, sel, canvas2, preWarnings, infos);
+  return `S2 : ${sel.length>=3?3:0}/3 (${sel.length} services)`
+       + (preWarnings.length ? ` ⚠${preWarnings.length}` : "");
+}
+
+// ---- S7 : transports en commun à moins d'1 km ----
+// Modes : Bus, Tram, Métro, Train, Ferry. Validé si ≥ 2 transports (2 modes
+// différents, ou une même gamme avec plusieurs lignes de bus).
+function transitModeOfStop(t){
+  if(t.highway === "bus_stop" || t.amenity === "bus_station") return "Bus";
+  if(t.railway === "tram_stop") return "Tram";
+  if(t.railway === "station" || t.railway === "halt")
+    return t.station === "subway" ? "Métro" : "Train";
+  if(t.amenity === "ferry_terminal") return "Ferry";
+  return null;
+}
+const ROUTE_MODES = {bus:"Bus", trolleybus:"Bus", coach:"Bus", tram:"Tram",
+                     subway:"Métro", train:"Train", light_rail:"Train",
+                     ferry:"Ferry"};
+
+async function overpassQuery(q, timeout, noRetry){
+  // 1) Cache navigateur (7 jours) : une adresse déjà analysée ne consomme
+  //    plus aucun quota serveur.
+  const ck = "esgov:" + hashQ(q);
+  const hit = cacheGet(ck);
+  if(hit) return hit;
+  // 2) Course échelonnée : serveur 1 tout de suite, le suivant seulement si
+  //    toujours rien après 5 s, etc. La première réponse valide gagne et
+  //    annule le reste. Dans le cas normal, UNE seule requête part — le
+  //    quota par IP n'est pas gaspillé sur les autres serveurs.
+  let res = await overpassRace(q, timeout || 30000);
+  if(res === null && !noRetry){
+    status("Serveurs cartographiques occupés — nouvel essai automatique dans 5 s…");
+    await sleep(5000);
+    res = await overpassRace(q, timeout || 30000);
+  }
+  if(res && (res.elements || []).length) cacheSet(ck, res);
+  return res;
+}
+
+function overpassRace(q, ms){
+  // Un résultat vide doit être confirmé par un second serveur avant d'être
+  // cru (un serveur à données partielles ne doit pas produire un faux zéro).
+  // Le dernier serveur qui a répondu est mémorisé et essayé en premier.
+  const order = [...OVERPASS];
+  const lastGood = localStorage.getItem("esgov:lastgood");
+  if(lastGood && order.includes(lastGood)){
+    order.splice(order.indexOf(lastGood), 1);
+    order.unshift(lastGood);
+  }
+  return new Promise(resolve => {
+    let pending = order.length, empties = 0, emptyRes = null, done = false;
+    const ctls = [];
+    const finish = v => {
+      if(done) return;
+      done = true;
+      for(const c of ctls) c.abort();
+      resolve(v);
+    };
+    order.forEach((base, i) => setTimeout(async () => {
+      const ctl = new AbortController(); ctls.push(ctl);
+      const t = setTimeout(() => ctl.abort(), ms);
+      try{
+        if(done) return;
+        const resp = await fetch(base, {method: "POST",
+          body: "data=" + encodeURIComponent(q), signal: ctl.signal});
+        if(!resp.ok) throw new Error("HTTP " + resp.status);
+        const j = await resp.json();
+        // 200 OK mais requête expirée côté serveur = résultat tronqué/vide
+        if(j.remark && /timed out|error/i.test(j.remark))
+          throw new Error("réponse tronquée");
+        try{ localStorage.setItem("esgov:lastgood", base); }catch(_){}
+        if((j.elements || []).length) return finish(j);
+        emptyRes = j;
+        if(++empties >= 2) return finish(j);  // vide confirmé par 2 serveurs
+      }catch(e){ /* les serveurs suivants prennent le relais */ }
+      finally{
+        clearTimeout(t);
+        // dernier arrivé et personne n'a gagné : vide non confirmé ou null
+        if(--pending === 0 && !done){ done = true; resolve(emptyRes); }
+      }
+    }, i * 5000));
+  });
+}
+
+async function findTransit(lat, lon, radius, pre){
+  if(gaKey()){
+    try{
+      const feats = await gaPlaces(lat, lon, radius, "public_transport", 200);
+      const stops = [], refLines = new Map();
+      const CAT_MODE = {bus:"Bus", tram:"Tram", subway:"Métro", train:"Train",
+                        light_rail:"Train", ferry:"Ferry"};
+      for(const p of feats){
+        const t = p.raw;
+        let mode = transitModeOfStop(t);
+        if(!mode)
+          for(const c of p.categories){
+            const m = CAT_MODE[c.split(".")[1]];
+            if(m){ mode = m; break; }
+          }
+        if(!mode) continue;
+        stops.push({name: p.name || t.name || `Arrêt ${mode.toLowerCase()}`,
+          mode, lat: p.lat, lon: p.lon, crow: havM(lat, lon, p.lat, p.lon),
+          id: (t.osm_type === "node" || t.osm_type === "n") ? t.osm_id : null});
+        for(const ref of (t.route_ref || "").split(/[;,]\s*/))
+          if(ref) refLines.set(mode + "|" + ref, {mode, ref});
+      }
+      if(stops.length)
+        return {stops, lines: [...refLines.values()], degraded: false,
+                linesPartial: refLines.size === 0};
+    }catch(e){ /* repli sur les serveurs OSM publics ci-dessous */ }
+  }
+  // Arrêts + lignes en une réponse (préchargée ou requête dédiée) ; repli
+  // sur les tags route_ref des arrêts si les relations manquent.
+  const qStops = `[out:json][timeout:25];
+(
+  node["highway"="bus_stop"](around:${radius},${lat},${lon});
+  node["railway"~"^(tram_stop|station|halt)$"](around:${radius},${lat},${lon});
+  node["amenity"~"^(bus_station|ferry_terminal)$"](around:${radius},${lat},${lon});
+);
+out body;`;
+  const res = pre || await overpassQuery(qStops);
+  if(!res) return {stops:[], lines:[], degraded:true};
+  const stops = [], refLines = new Map(), lineSet = new Map();
+  for(const el of res.elements || []){
+    const t = el.tags || {};
+    if(el.type === "relation"){  // lignes préchargées avec les arrêts
+      const mode = ROUTE_MODES[t.route], ref = t.ref || t.name;
+      if(mode && ref) lineSet.set(mode + "|" + ref, {mode, ref});
+      continue;
+    }
+    const mode = transitModeOfStop(t);
+    if(!mode || el.lat === undefined) continue;
+    stops.push({name: t.name || `Arrêt ${mode.toLowerCase()}`, mode, id: el.id,
+                lat:+el.lat, lon:+el.lon, crow:havM(lat,lon,+el.lat,+el.lon)});
+    for(const ref of (t.route_ref || "").split(/[;,]\s*/))
+      if(ref) refLines.set(mode + "|" + ref, {mode, ref});
+  }
+  if(lineSet.size || pre)
+    return {stops, lines:[...lineSet.values()], degraded:false,
+            linesPartial:false};
+
+  const qLines = `[out:json][timeout:25];
+rel["route"~"^(${Object.keys(ROUTE_MODES).join("|")})$"](around:${radius},${lat},${lon});
+out tags;`;
+  const resLines = await overpassQuery(qLines);
+  if(resLines){
+    for(const el of resLines.elements || []){
+      const t = el.tags || {};
+      const mode = ROUTE_MODES[t.route], ref = t.ref || t.name;
+      if(mode && ref) lineSet.set(mode + "|" + ref, {mode, ref});
+    }
+    return {stops, lines:[...lineSet.values()], degraded:false,
+            linesPartial:false};
+  }
+  // Relations indisponibles : lignes issues des tags des arrêts (partiel)
+  return {stops, lines:[...refLines.values()], degraded:false,
+          linesPartial:true};
+}
+
+// Lignes desservant CHAQUE arrêt retenu, en UNE requête groupée : relations
+// passant par les nœuds des arrêts (ou les stop_position à moins de 80 m),
+// attribution par arrêt côté client via la liste des membres — évite
+// d'attribuer à un arrêt toutes les lignes du secteur.
+async function stopLinesBatch(stops){
+  const withId = stops.filter(s => s.id);
+  if(!withId.length) return null;
+  const modes = Object.keys(ROUTE_MODES).join("|");
+  const q = `[out:json][timeout:20];
+(${withId.map(s => `node(${s.id});`).join("")})->.stops;
+node(around.stops:80)["public_transport"="stop_position"]->.near;
+(.stops; .near;)->.all;
+rel(bn.all)["route"~"^(${modes})$"];
+out body;
+.near out skel;`;
+  // Enrichissement, pas critère : un seul essai, délai court — le repli
+  // « lignes du secteur » est signalé dans les contrôles.
+  const res = await overpassQuery(q, 15000, true);
+  if(!res) return null;
+  const nearNodes = [], rels = [];
+  for(const el of res.elements || []){
+    if(el.type === "relation") rels.push(el);
+    else if(el.type === "node" && el.lat !== undefined) nearNodes.push(el);
+  }
+  const out = new Map();
+  for(const s of withId){
+    const mine = new Set([s.id]);
+    for(const n of nearNodes)
+      if(havM(s.lat, s.lon, +n.lat, +n.lon) <= 80) mine.add(n.id);
+    const refs = new Set();
+    for(const r of rels){
+      const t = r.tags || {};
+      if(ROUTE_MODES[t.route] !== s.mode) continue;
+      if((r.members || []).some(m => m.type === "node" && mine.has(m.ref))){
+        const ref = t.ref || t.name;
+        if(ref) refs.add(ref);
+      }
+    }
+    out.set(s.id, [...refs].sort());
+  }
+  return out;
+}
+
+async function runS7(addr, asset, infos, preWarnings, pre){
+  status("S7 — Recherche des transports en commun (" + srcLabel() + ")…");
+  const {stops, lines, degraded, linesPartial} =
+    await findTransit(asset.lat, asset.lon, 1000, pre);
+  if(degraded) throw new Error(
+    "S7 : serveurs cartographiques publics momentanément saturés (quota par "
+    + "adresse IP) — réessayez dans 1 à 2 minutes plutôt que de conclure à "
+    + "l'absence de transports.");
+  if(linesPartial)
+    preWarnings.push("recensement des lignes partiel (relations OSM "
+      + "indisponibles) : le nombre de lignes peut être sous-évalué");
+  if(!stops.length) throw new Error(
+    "S7 : aucun arrêt de transport en commun trouvé à moins d'1 km — "
+    + "critère non validé (0/3).");
+  status("S7 — Itinéraires piétons vers les arrêts…");
+  // L'arrêt le plus proche de chaque mode, validé par itinéraire piéton réel
+  const byMode = {};
+  for(const s of stops)
+    if(!(s.mode in byMode) || s.crow < byMode[s.mode].crow) byMode[s.mode] = s;
+  const sel = [];
+  for(const s of Object.values(byMode).sort((a,b)=>a.crow-b.crow)){
+    if(sel.length >= 3) break;
+    const r = await walkRoute(asset, s); await sleep(300);
+    if(r.m <= 1000){
+      sel.push({s: {...s, cat: s.mode}, route: r, lines: []});
+      if(r.m >= 900)
+        preWarnings.push(`arrêt ${s.name} à ${r.m} m — proche du seuil d'1 km`);
+    }
+  }
+  // Lignes de CHAQUE arrêt retenu (une seule requête groupée) ; à défaut,
+  // lignes du secteur — signalé dans les contrôles.
+  status("S7 — Attribution des lignes par arrêt…");
+  const perStop = sel.length ? await stopLinesBatch(sel.map(it => it.s)) : null;
+  let sectorFallback = false;
+  for(const it of sel){
+    const refs = perStop && perStop.get(it.s.id);
+    if(refs && refs.length) it.lines = refs;
+    else{
+      it.lines = lines.filter(l => l.mode === it.s.mode).map(l => l.ref);
+      sectorFallback = true;
+    }
+  }
+  if(sectorFallback)
+    infos.push("attribution des lignes par arrêt indisponible pour certains "
+      + "arrêts — lignes du secteur (< 1 km) affichées");
+  const busLines = (sel.find(it => it.s.mode === "Bus") || {lines:[]})
+    .lines.length;
+  const ok = sel.length >= 2 || busLines >= 2;
+  const transports = sel.length >= 2 ? `${sel.length} modes`
+                   : busLines >= 2 ? `${busLines} lignes de bus`
+                   : `${sel.length} transport(s)`;
+  if(!sel.length) throw new Error(
+    "S7 : aucun arrêt à moins d'1 km à pied — critère non validé (0/3).");
+  status("S7 — Dessin de la carte et génération du PDF…");
+  const canvas = await drawMapS2(asset, sel);
+  buildS7Pdf(addr, asset, sel, canvas, preWarnings, infos, ok, transports);
+  return `S7 : ${ok?3:0}/3 (${transports})`
+       + (preWarnings.length ? ` ⚠${preWarnings.length}` : "");
+}
+
+function buildS7Pdf(addr, asset, sel, canvas, warnings, infos, ok, transports){
+  const {jsPDF} = window.jspdf;
+  const doc = new jsPDF({unit:"mm", format:"a4"});
+  const L = 15, W = 180, today = new Date().toLocaleDateString("fr-FR");
+  let y = 16;
+
+  doc.setFont("helvetica","bold"); doc.setFontSize(15);
+  doc.text("Critère S7 — Mobilité durable", 105, y, {align:"center"});
+  y += 6; doc.setFont("helvetica","normal"); doc.setFontSize(9.5);
+  doc.setTextColor(85);
+  doc.text("Transports en commun à moins de 1 km à pied du site — au moins "
+           + "2 modes d'acheminement différents (lignes, transports)",
+           105, y, {align:"center"});
+  y += 5;
+  doc.text(`Actif : ${addr}   ·   Date de l'analyse : ${today}`, 105, y,
+           {align:"center"});
+  y += 5;
+
+  doc.setFillColor(...(ok ? [24,128,56] : [217,48,37]));
+  doc.rect(L, y, W, 9, "F");
+  doc.setTextColor(255); doc.setFont("helvetica","bold"); doc.setFontSize(10.5);
+  doc.text(`SCORE : ${ok?3:0} / 3 — Critère ${ok?"validé":"non validé"} — `
+           + transports, 105, y+6, {align:"center"});
+  y += 14;
+
+  doc.setTextColor(0); doc.setFontSize(11);
+  doc.text("Transports retenus", L, y); y += 3;
+  const rows = sel.map((it,i) =>
+    [`${i+1}. ${it.s.mode}`,
+     `${it.s.name} — ${it.route.m} m · ${it.route.min} min à pied`
+     + (it.lines.length ? ` — ${it.lines.length} ligne(s) : `
+        + it.lines.slice(0,12).join(", ")
+        + (it.lines.length > 12 ? "…" : "") : "")]);
+  const ctrl = [];
+  if(warnings.length) ctrl.push("ATTENTION : " + warnings.join(" ; "));
+  if(infos.length) ctrl.push(infos.join(" ; "));
+  rows.push(["Contrôles automatiques", ctrl.join(". ") || "RAS"]);
+  rows.push(["Source", "Arrêts, lignes et itinéraires piétons : "
+             + srcLabel() + ` ; consulté le ${today}`]);
+  doc.setFontSize(8.5);
+  for(const [k,v] of rows){
+    const lines = doc.splitTextToSize(v, 128);
+    const rh = Math.max(7, lines.length*4 + 3);
+    doc.setFillColor(242,242,242); doc.rect(L, y, 45, rh, "FD");
+    doc.rect(L+45, y, W-45, rh);
+    doc.setFont("helvetica","bold"); doc.text(k, L+2, y+4.6);
+    doc.setFont("helvetica","normal"); doc.text(lines, L+47, y+4.6);
+    y += rh;
+  }
+  y += 4;
+  doc.setFontSize(7); doc.setTextColor(0,0,238);
+  sel.forEach((it,i)=>{
+    const u = `https://www.google.com/maps/dir/${asset.lat},${asset.lon}/`
+            + `${it.s.lat},${it.s.lon}/data=!4m2!4m1!3e2`;
+    doc.textWithLink(`Itinéraire vérifiable ${i+1} (${it.s.name}) : ${u}`,
+                     L, y, {url: u});
+    y += 4;
+  });
+  y += 2;
+
+  doc.setTextColor(0); doc.setFont("helvetica","bold"); doc.setFontSize(11);
+  doc.text("Preuve — itinéraires piétons vers les arrêts", L, y); y += 3;
+  const ih = W * canvas.height / canvas.width;
+  doc.addImage(canvas.toDataURL("image/jpeg", .92), "JPEG", L, y, W, ih);
+  y += ih + 4;
+  doc.setFont("helvetica","normal"); doc.setFontSize(7.5); doc.setTextColor(100);
+  doc.text(doc.splitTextToSize(
+    "Carte OpenStreetMap générée dans le navigateur : actif en rouge, arrêts "
+    + "numérotés avec leur itinéraire piéton réel. Lignes recensées par "
+    + "OpenStreetMap ; vérifiables via les liens Google Maps ci-dessus.", W),
+    L, y);
+  y += 9;
+
+  doc.setTextColor(0); doc.setFont("helvetica","bold"); doc.setFontSize(11);
+  doc.text("Conclusion", L, y); y += 5;
+  doc.setFont("helvetica","normal"); doc.setFontSize(9.5);
+  const det = sel.map(it => `${it.s.mode.toLowerCase()} (${it.s.name}, `
+    + `${it.route.m} m${it.lines.length ? `, ${it.lines.length} ligne(s)` : ""})`)
+    .join(" ; ");
+  const concl = ok
+    ? `Le site est desservi par ${transports} à moins d'1 km à pied : ${det}. `
+      + `Le critère S7 est validé : 3/3.`
+    : `Desserte insuffisante à moins d'1 km à pied (${det || "aucun arrêt"}) — `
+      + `il faut au moins 2 modes différents ou plusieurs lignes de bus. `
+      + `Le critère S7 n'est pas validé : 0/3.`;
+  doc.text(doc.splitTextToSize(concl, W), L, y);
+
+  const slug = addr.normalize("NFD").replace(/[̀-ͯ]/g,"")
+                   .replace(/[^A-Za-z0-9]+/g,"_").replace(/^_|_$/g,"");
+  doc.save(`S7_${slug || "rapport"}.pdf`);
+}
+
+async function run(){
+  const addr = document.getElementById("address").value.trim();
+  if(!addr){ status("Entrez une adresse.", true); return; }
+  const btn = document.getElementById("go"); btn.disabled = true;
+  try{
+    status("1/4 — Géocodage de l'adresse…");
+    const asset = await geocode(addr);
+    const infos = [], preWarnings = [];
+    const tenantName = document.getElementById("tenant").value.trim();
+    if(tenantName){
+      status("1/4 — Localisation du locataire « " + tenantName + " »…");
+      const t = await findTenant(tenantName, asset.lat, asset.lon,
+                                 asset.vague ? 5000 : 1500);
+      if(t && asset.vague){
+        // Adresse floue : le bâtiment du locataire devient le point de départ
+        asset.lat = t.lat; asset.lon = t.lon;
+        infos.push(`point de l'actif calé sur le locataire « ${t.label} » `
+          + `(adresse résolue approximativement, échelle : ${asset.scale})`);
+      }else if(t && t.crow <= 250){
+        infos.push(`locataire « ${t.label} » localisé à ${Math.round(t.crow)} m `
+          + `du point géocodé — bâtiment confirmé`);
+      }else if(t){
+        preWarnings.push(`locataire « ${t.label} » trouvé à ${Math.round(t.crow)} m `
+          + `du point géocodé — adresse ou locataire à vérifier`);
+      }else{
+        infos.push(`locataire « ${tenantName} » introuvable dans OpenStreetMap `
+          + `autour de l'adresse (non bloquant : couverture partielle des enseignes)`);
+        if(asset.vague)
+          preWarnings.push(`adresse résolue approximativement (échelle : `
+            + `${asset.scale}) — précisez l'adresse`);
+      }
+    }else if(asset.vague){
+      preWarnings.push(`adresse résolue approximativement (échelle : `
+        + `${asset.scale}) — précisez l'adresse ou renseignez un locataire`);
+    }
+    const chosen = [...document.querySelectorAll(".crit:checked")]
+      .map(c => c.value);
+    if(!chosen.length) throw new Error("cochez au moins un critère.");
+    let pre = null;
+    GA_OK = null;
+    if(gaKey()){
+      // Tester la clé AVANT tout : une clé invalide (401) doit se voir,
+      // pas provoquer une bascule silencieuse vers les serveurs saturés.
+      status("2/4 — Vérification de la clé Geoapify…");
+      try{
+        await gaPlaces(asset.lat, asset.lon, 100, "catering", 1);
+        GA_OK = true;
+      }catch(e){
+        GA_OK = false;
+        preWarnings.push("clé Geoapify REFUSÉE (" + e.message + ") — analyse "
+          + "faite via les serveurs publics ; corrigez la clé dans le champ "
+          + "de la page");
+        status("Clé Geoapify refusée (" + e.message + ") — passage sur les "
+          + "serveurs publics…", true);
+        await sleep(2500);  // laisser le message visible
+      }
+    }
+    if(gaKey()){
+      localStorage.setItem("esg_geoapify_key", gaKey());
+      status("2/4 — Recherche des lieux via Geoapify…");
+    }else{
+      status("2/4 — Données cartographiques (une requête mutualisée pour "
+             + chosen.length + " critère(s))…");
+      // Si la requête mutualisée échoue, chaque critère retentera sa propre
+      // requête (puis son plan B Nominatim) — on ne bloque rien ici.
+      pre = await prefetchAll(asset.lat, asset.lon, chosen);
+    }
+    const runners = {S6: runS6, S2: runS2, S7: runS7};
+    const results = [];
+    let failures = 0;
+    for(const c of chosen){
+      try{
+        results.push(await runners[c](addr, asset,
+                                      infos.slice(), preWarnings.slice(), pre));
+      }catch(e){
+        failures++;
+        results.push(`${c} : ÉCHEC — ${e.message.replace(/^S\d+ ?: ?/, "")}`);
+      }
+    }
+    status((failures ? "Terminé avec échec(s) — " : "Terminé ✅ — ")
+           + results.join("  ·  "), failures > 0);
+  }catch(e){
+    status("Échec : " + e.message, true);
+  }finally{
+    btn.disabled = false;
+  }
+}
+document.getElementById("address").addEventListener("keydown",
+  e => { if(e.key === "Enter") run(); });
+document.getElementById("apikey").value =
+  localStorage.getItem("s6_anthropic_key") || "";
+// La clé intégrée au fichier prime sur celle mémorisée par le navigateur :
+// un fichier distribué par l'admin est la référence, une vieille clé mal
+// collée en localStorage ne doit pas le court-circuiter.
+document.getElementById("gakey").value =
+  DEFAULT_GA_KEY || localStorage.getItem("esg_geoapify_key") || "";
+document.getElementById("gakey").addEventListener("change",
+  e => localStorage.setItem("esg_geoapify_key", e.target.value.trim()));
+</script>
+</body>
+</html>
