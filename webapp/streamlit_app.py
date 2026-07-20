@@ -27,6 +27,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
 import build_report  # noqa: E402  -> generate(cfg, out) renvoie le niveau de preuve
 import s6_auto        # noqa: E402  -> research(address, radius, locataire) -> cfg
 
+# Streamlit Community Cloud n'a pas de navigateur Chromium : la capture Google
+# Maps (Playwright) échouerait après un long timeout et tenterait de télécharger
+# ~150 Mo de Chromium à chaque rapport. On la neutralise ICI seulement (Flask et
+# s6.html gardent la capture) ; la preuve tombe alors sur la carte OpenStreetMap
+# en ligne avec l'itinéraire piéton OSRM réel, qui fonctionne sur le cloud.
+build_report.try_maps_capture = lambda *a, **k: None  # noqa: E731
+
 # Modèle OpenAI de vérification (peu coûteux, structured output). Ajustable ici.
 OPENAI_MODEL = "gpt-4o-mini"
 
