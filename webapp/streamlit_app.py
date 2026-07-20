@@ -121,12 +121,9 @@ with st.form("s6"):
     locataire = st.text_input(
         "Locataire / enseigne (optionnel)",
         placeholder="confirme le bâtiment, ou ancre le point si l'adresse est vague")
-    ga_ui = st.text_input(
-        "Clé Geoapify (optionnelle — sinon lue dans les Secrets)",
-        type="password", placeholder="laisser vide si configurée dans les Secrets")
     st.caption("Géocodage via l'API Adresse de l'État (France) ; espaces verts "
-               "et itinéraire via Geoapify si une clé est disponible, sinon "
-               "OpenStreetMap. La clé n'est ni stockée ni journalisée.")
+               "et itinéraire via Geoapify (clé lue dans les Secrets de l'app), "
+               "sinon OpenStreetMap.")
     openai_key = st.text_input(
         "Clé API OpenAI (optionnelle — active la vérification du résultat)",
         type="password", placeholder="sk-...")
@@ -136,12 +133,12 @@ with st.form("s6"):
 
 if submitted:
     if not address.strip():
-        st.warning("Adresse vide.")
+        st.error("Renseignez l'adresse de l'actif avant de générer le rapport.")
         st.stop()
     with st.spinner("Recherche de l'espace vert, itinéraire piéton et carte "
                     "(30 à 60 s)…"):
         try:
-            geoapify_s6.set_key(ga_ui.strip() or geoapify_key_from_secrets())
+            geoapify_s6.set_key(geoapify_key_from_secrets())
             cfg = s6_auto.research(address.strip(),
                                    locataire=locataire.strip() or None)
             # Source honnête : refléter les services réellement utilisés
