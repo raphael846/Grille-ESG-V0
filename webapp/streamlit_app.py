@@ -81,10 +81,18 @@ def koala_walk():
         @keyframes koala-vanish { 0%,90% { opacity: 1; } 100% { opacity: 0; } }
         #koala-walker {
           position: fixed; bottom: 12px; left: -64px; font-size: 42px;
-          z-index: 9999; pointer-events: none; will-change: left, bottom, transform;
+          z-index: 0; pointer-events: none; will-change: left, bottom, transform;
           animation: koala-walk 48s linear infinite,
                      koala-bob 1.6s ease-in-out infinite,
                      koala-vanish 30s ease-out forwards;
+        }
+        /* Le contenu passe DEVANT le koala : il se balade derrière les encadrés
+           (formulaire, commentaire, bandeaux, tableaux…). */
+        [data-testid="stForm"], [data-testid="stAlert"], [data-testid="stCode"],
+        [data-testid="stTable"], [data-testid="stDataFrame"],
+        [data-testid="stExpander"], [data-testid="stDownloadButton"],
+        [data-testid="stNotification"], .stCodeBlock {
+          position: relative; z-index: 1;
         }
         </style>
         <div id="koala-walker">🐨</div>
