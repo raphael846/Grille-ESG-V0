@@ -19,6 +19,7 @@ Critères :
   - S7 : ≥ 2 modes de transport en commun à moins d'1 km (3/3 ou 0)
 """
 
+import io
 import json
 import os
 import re
@@ -26,6 +27,7 @@ import sys
 import tempfile
 import unicodedata
 import urllib.parse
+import zipfile
 
 import streamlit as st
 
@@ -93,6 +95,17 @@ def koala_walk():
         [data-testid="stExpander"], [data-testid="stDownloadButton"],
         [data-testid="stNotification"], .stCodeBlock {
           position: relative; z-index: 1;
+        }
+        /* Bouton « Générer » en vert ; grisé quand désactivé / pendant le traitement */
+        [data-testid="stFormSubmitButton"] button {
+          background-color: #188038; color: #fff; border: 0; font-weight: 600;
+        }
+        [data-testid="stFormSubmitButton"] button:hover {
+          background-color: #146c2e; color: #fff;
+        }
+        [data-testid="stFormSubmitButton"] button:disabled,
+        [data-testid="stFormSubmitButton"] button[disabled] {
+          background-color: #b8c6bc; color: #eef2ee; cursor: not-allowed;
         }
         </style>
         <div id="koala-walker">🐨</div>
@@ -407,8 +420,9 @@ if submitted:
         # 3) Génération du PDF
         with st.spinner(f"{kind} — génération du PDF…"):
             try:
-                out = os.path.join(tempfile.mkdtemp(prefix="esgst_"),
-                                   f"{kind}_{slugify(address)}.pdf")
+                date_str = cfg.get("analysis_date", "").replace("/", "")  # ex. 20072026
+                stem = f"{kind}_{slugify(address)}" + (f"_{date_str}" if date_str else "")
+                out = os.path.join(tempfile.mkdtemp(prefix="esgst_"), f"{stem}.pdf")
                 proof = generate_pdf(kind, cfg, out)
                 with open(out, "rb") as f:
                     pdf_bytes = f.read()
@@ -427,5 +441,16 @@ if submitted:
     if any("cfg" in r for r in results):
         st.balloons()  # confettis quand la recherche est terminée
 
-for r in st.session_state.get("results", []):
+_results = st.session_state.get("results", [])
+_pdfs = [r for r in _results if r.get("pdf_bytes")]
+if len(_pdfs) > 1:
+    _buf = io.BytesIO()
+    with zipfile.ZipFile(_buf, "w", zipfile.ZIP_DEFLATED) as _z:
+        for r in _pdfs:
+            _z.writestr(r["filename"], r["pdf_bytes"])
+    st.download_button(f"⬇️ Télécharger les {len(_pdfs)} PDF (ZIP)",
+                       data=_buf.getvalue(), file_name="Greenfast_rapports.zip",
+                       mime="application/zip", key="dl_all")
+
+for r in _results:
     render_result(r)
