@@ -366,8 +366,12 @@ with st.form("esg"):
     locataire = st.text_input(
         "Locataire / enseigne (optionnel)",
         placeholder="confirme le bâtiment, ou ancre le point si l'adresse est vague")
-    submitted = st.form_submit_button("Générer le(s) rapport(s)")
+    # Bouton désactivé (grisé) pendant le traitement — voir le rerun en 2 temps.
+    submitted = st.form_submit_button(
+        "Générer le(s) rapport(s)",
+        disabled=st.session_state.get("busy", False))
 
+# --- Étape A : clic -> validation, puis on grise le bouton et on relance ---
 if submitted:
     kinds = [k for k, _ in CRITERES if checks_ui[k]]
     if not address.strip():
@@ -377,69 +381,79 @@ if submitted:
         st.error("Cochez au moins un critère.")
         st.stop()
 
-    # Adresse ambiguë (ex. « rue de Paris » -> plusieurs villes) : demander une
-    # précision plutôt que de géocoder au hasard. Ne bloque que les adresses
-    # françaises ambiguës ; une adresse hors France (absente de la BAN) passe.
-    # La BAN note ~0,98 chaque correspondance exacte du nom de voie : une voie
-    # présente dans plusieurs communes ressort donc en plusieurs candidats forts.
-    # Ambiguïté = plusieurs communes parmi les candidats à score élevé. Un score
-    # faible partout (adresse hors France) => aucun candidat fort => on laisse
-    # passer (le pipeline tentera Nominatim).
+    # Adresse ambiguë (ex. « rue de Paris » -> plusieurs villes) : proposer des
+    # précisions plutôt que de géocoder au hasard. Ne bloque que les adresses
+    # françaises ambiguës (plusieurs communes parmi les candidats BAN forts) ;
+    # une adresse hors France (aucun candidat fort) passe (repli Nominatim).
     cands = geocode_candidates(address.strip())
     high = [c for c in cands if c["score"] >= 0.6]
     if high and len({(c["postcode"], c["city"]) for c in high}) > 1:
         st.warning("Adresse ambiguë — cette voie existe dans plusieurs communes. "
-                   "Précisez la **ville** ou le **code postal**, puis relancez. "
-                   "Par exemple :")
+                   "Copiez une des adresses ci-dessous (icône copier), collez-la "
+                   "dans le champ Adresse, puis relancez :")
         for c in high[:6]:
-            st.write(f"• {c['label']}")
+            st.code(c["label"], language=None)
         st.stop()
 
-    geoapify_s6.set_key(geoapify_key_from_secrets())
-    key = openai_key.strip()
+    # Validation OK : mémoriser la demande, griser le bouton, traiter au run suivant.
+    st.session_state["pending"] = {
+        "kinds": kinds, "address": address.strip(),
+        "locataire": locataire.strip() or None, "key": openai_key.strip(),
+    }
+    st.session_state["busy"] = True
+    st.rerun()
+
+# --- Étape B : run « occupé » -> le bouton est grisé, on fait le travail ---
+if st.session_state.get("busy"):
+    p = st.session_state.get("pending") or {}
     results = []
-    for kind in kinds:
-        # 1) Recherche (sans PDF)
-        with st.spinner(f"{kind} — recherche des POI et itinéraires…"):
-            try:
-                cfg = research_only(kind, address.strip(), locataire.strip() or None)
-                sources = dict(geoapify_s6.last)
-            except Exception as e:
-                results.append({"kind": kind, "error": str(e)})
-                continue
-
-        # 2) Vérification IA AVANT la création du PDF (chaque critère)
-        verif, verif_error = None, None
-        if key:
-            with st.spinner(f"{kind} — vérification IA du résultat…"):
+    try:
+        geoapify_s6.set_key(geoapify_key_from_secrets())
+        for kind in p.get("kinds", []):
+            with st.spinner(f"{kind} — recherche des POI et itinéraires…"):
                 try:
-                    verif = verify_with_openai(kind, cfg, key)
+                    cfg = research_only(kind, p["address"], p["locataire"])
+                    sources = dict(geoapify_s6.last)
                 except Exception as e:
-                    verif_error = str(e)
+                    results.append({"kind": kind, "error": str(e)})
+                    continue
 
-        # 3) Génération du PDF
-        with st.spinner(f"{kind} — génération du PDF…"):
-            try:
-                date_str = cfg.get("analysis_date", "").replace("/", "")  # ex. 20072026
-                stem = f"{kind}_{slugify(address)}" + (f"_{date_str}" if date_str else "")
-                out = os.path.join(tempfile.mkdtemp(prefix="esgst_"), f"{stem}.pdf")
-                proof = generate_pdf(kind, cfg, out)
-                with open(out, "rb") as f:
-                    pdf_bytes = f.read()
-            except Exception as e:
-                results.append({"kind": kind, "error": str(e)})
-                continue
+            verif, verif_error = None, None  # vérif IA AVANT le PDF
+            if p["key"]:
+                with st.spinner(f"{kind} — vérification IA du résultat…"):
+                    try:
+                        verif = verify_with_openai(kind, cfg, p["key"])
+                    except Exception as e:
+                        verif_error = str(e)
 
-        results.append({
-            "kind": kind, "cfg": cfg, "proof": proof, "pdf_bytes": pdf_bytes,
-            "filename": os.path.basename(out), "sources": sources,
-            "comment": build_comment(kind, cfg), "verif": verif,
-            "verif_error": verif_error,
-        })
-    # Persiste : un clic sur un bouton de téléchargement relance le script.
+            with st.spinner(f"{kind} — génération du PDF…"):
+                try:
+                    date_str = cfg.get("analysis_date", "").replace("/", "")  # 20072026
+                    stem = f"{kind}_{slugify(p['address'])}" + (
+                        f"_{date_str}" if date_str else "")
+                    out = os.path.join(tempfile.mkdtemp(prefix="esgst_"), f"{stem}.pdf")
+                    proof = generate_pdf(kind, cfg, out)
+                    with open(out, "rb") as f:
+                        pdf_bytes = f.read()
+                except Exception as e:
+                    results.append({"kind": kind, "error": str(e)})
+                    continue
+
+            results.append({
+                "kind": kind, "cfg": cfg, "proof": proof, "pdf_bytes": pdf_bytes,
+                "filename": os.path.basename(out), "sources": sources,
+                "comment": build_comment(kind, cfg), "verif": verif,
+                "verif_error": verif_error,
+            })
+    finally:
+        st.session_state["busy"] = False
+        st.session_state.pop("pending", None)
     st.session_state["results"] = results
-    if any("cfg" in r for r in results):
-        st.balloons()  # confettis quand la recherche est terminée
+    st.session_state["just_finished"] = any("cfg" in r for r in results)
+    st.rerun()  # réaffiche le bouton en vert + les résultats
+
+if st.session_state.pop("just_finished", False):
+    st.balloons()  # confettis une fois la recherche terminée
 
 _results = st.session_state.get("results", [])
 _pdfs = [r for r in _results if r.get("pdf_bytes")]
