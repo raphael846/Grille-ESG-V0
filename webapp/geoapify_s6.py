@@ -356,25 +356,53 @@ def stop_lines(stop):
 # Carte de preuve : Static Maps Geoapify (1 requête/image) -> repli staticmap OSM
 # ---------------------------------------------------------------------------
 
+def _ga_route_coords(lat1, lon1, lat2, lon2, timeout):
+    """Géométrie de l'itinéraire piéton Geoapify : liste de points (lon, lat)."""
+    url = "https://api.geoapify.com/v1/routing?" + urllib.parse.urlencode(
+        {"waypoints": f"{lat1},{lon1}|{lat2},{lon2}", "mode": "walk", "apiKey": _KEY})
+    geom = s6_auto.http_json(url, timeout=timeout)["features"][0]["geometry"]
+    if geom["type"] == "LineString":
+        return [(c[0], c[1]) for c in geom["coordinates"]]
+    pts = []  # MultiLineString
+    for seg in geom["coordinates"]:
+        pts += [(c[0], c[1]) for c in seg]
+    return pts
+
+
 def try_online_map(asset, park, out_path, timeout=15):
     """Carte de preuve via l'API Static Maps de Geoapify : une seule requête par
     image (bien plus rapide que le rendu tuile par tuile de staticmap, et sans
-    rate-limit sur les tuiles OSM publiques). Repli sur la carte OSM d'origine."""
+    rate-limit sur les tuiles OSM publiques). Le TRACÉ est l'itinéraire piéton
+    réel (Geoapify Routing), pas une droite. Repli sur la carte OSM d'origine."""
     if _KEY:
         try:
             lon1, lat1 = asset["lon"], asset["lat"]
             lon2, lat2 = park["lon"], park["lat"]
-            span = max(abs(lat1 - lat2), abs(lon1 - lon2))
-            pad = max(0.0009, span * 0.3)
-            west, east = min(lon1, lon2) - pad, max(lon1, lon2) + pad
-            south, north = min(lat1, lat2) - pad, max(lat1, lat2) + pad
+            try:
+                route = _ga_route_coords(lat1, lon1, lat2, lon2, timeout)
+            except Exception:
+                route = None
+            if route and len(route) >= 2:
+                pts = route
+                if len(pts) > 120:               # borne la longueur de l'URL
+                    step = len(pts) // 120 + 1
+                    pts = pts[::step] + [route[-1]]
+                itin = "itinéraire piéton réel (Geoapify, données OpenStreetMap)"
+            else:
+                pts = [(lon1, lat1), (lon2, lat2)]
+                itin = "liaison directe (itinéraire piéton indisponible)"
+            poly = ",".join(f"{lon},{lat}" for lon, lat in pts)
+            xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+            pad = max(0.0009, max(max(xs) - min(xs), max(ys) - min(ys)) * 0.15)
+            west, east = min(xs) - pad, max(xs) + pad
+            south, north = min(ys) - pad, max(ys) + pad
             params = {
                 "style": "osm-bright", "width": 1400, "height": 900,
                 "area": f"rect:{west},{south},{east},{north}",
                 "marker": (f"lonlat:{lon1},{lat1};color:#d93025;size:medium"
                            f"|lonlat:{lon2},{lat2};color:#188038;size:medium"),
-                "geometry": (f"polyline:{lon1},{lat1},{lon2},{lat2}"
-                             f";linecolor:#1a73e8;linewidth:5;lineopacity:0.8"),
+                "geometry": (f"polyline:{poly}"
+                             ";linecolor:#1a73e8;linewidth:5;lineopacity:0.8"),
                 "apiKey": _KEY,
             }
             # urlencode encode les délimiteurs (| ; : , #) — sinon urllib rejette
@@ -389,7 +417,7 @@ def try_online_map(asset, park, out_path, timeout=15):
                 raise RuntimeError("réponse Static Maps non-image")
             with open(out_path, "wb") as f:
                 f.write(data)
-            return out_path, "carte Geoapify (fond OpenStreetMap)"
+            return out_path, f"carte Geoapify — {itin}"
         except Exception:
             pass  # repli sur la carte OSM (staticmap) d'origine
     return _orig_online_map(asset, park, out_path, timeout)
