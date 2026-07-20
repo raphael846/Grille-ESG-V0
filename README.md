@@ -1,97 +1,123 @@
-# Critères ESG géolocalisés — S6 et S2
+# Greenfast — instruction ESG géolocalisée
 
-Génère des **rapports PDF vérifiables** pour les critères géolocalisés de la
-grille ESG :
+Génère des **rapports PDF vérifiables** et des **commentaires prêts à coller
+dans Soneka** pour les critères géolocalisés de la grille ESG d'un actif
+immobilier. Une **adresse en entrée**, un PDF + un commentaire en sortie.
 
-- **S6 — Exposition à la biodiversité** : espace vert praticable à moins
-  d'1 km à pied de l'actif (score 4/4 ou 0/4) ;
-- **S2 — Présence de services** : 3 services de catégories différentes
-  (restaurant, hôtel, commerce, école, banque…) à moins d'1 km à pied, une
-  preuve par service (score 3/3 ou 0/3).
+Vocation à terme : couvrir toute la grille ESG. Aujourd'hui, les trois critères
+géolocalisés (tout se joue **à moins d'1 km à pied** de l'actif) :
 
-L'**adresse est la seule entrée** (+ un locataire optionnel pour confirmer ou
-ancrer le bâtiment). Le reste est automatique : géocodage, recherche,
-itinéraires piétons réels, cartes/captures de preuve, contrôles de cohérence,
-PDF. Dans la page web, un sélecteur choisit le critère ; dans Claude Code,
-`/s6` et `/s2` ; en CLI, `s6_auto.py` et `s2_auto.py`.
+| Critère | Question | Barème |
+|---|---|---|
+| **S2 — Présence de services** | 3 services de catégories différentes (restaurant, hôtel, commerce, école, banque…) à moins d'1 km à pied | 3/3 ou 0 |
+| **S6 — Exposition à la biodiversité** | Espace vert praticable (parc, jardin, square…) à moins d'1 km à pied | 4/4 ou 0 |
+| **S7 — Mobilité durable** | ≥ 2 modes de transport en commun à moins d'1 km à pied | 3/3 ou 0 |
+
+Le reste est automatique : géocodage, recherche des POI, itinéraires piétons
+réels, carte de preuve, contrôles de cohérence, PDF, commentaire.
 
 ---
 
-## Trois façons de l'utiliser
+## L'application (recommandé) — Greenfast sur Streamlit
 
-### 1. 👥 Équipe — un fichier à double-cliquer (gratuit, zéro installation)
+`webapp/streamlit_app.py` : l'interface d'équipe, déployée sur **Streamlit
+Community Cloud**. Cocher un ou plusieurs critères (S2/S6/S7), taper l'adresse,
+lancer → un bloc de résultat par critère avec le PDF téléchargeable et le
+commentaire Soneka copiable.
 
-Ouvrir **[`webapp/s6.html`](webapp/s6.html)** dans un navigateur (le
-télécharger puis double-cliquer). Taper l'adresse → le PDF se télécharge en
-~30 s. Aucune installation, aucun serveur, aucune IA requise, services
-OpenStreetMap gratuits.
+- **Géocodage** : API Adresse de l'État (BAN, `adresse.data.gouv.fr`) — sans
+  quota, idéale pour les adresses françaises — avec repli Nominatim.
+- **POI, itinéraires et carte de preuve** : **Geoapify** (Places, Routing,
+  Static Maps), avec repli OpenStreetMap (Overpass / OSRM / tuiles) si Geoapify
+  est indisponible. Le tracé de la carte est l'**itinéraire piéton réel**.
+- **Adresse ambiguë** (ex. « rue de Paris », présente dans plusieurs communes) :
+  l'app demande de préciser la ville ou le code postal au lieu de géocoder au
+  hasard.
+- **Vérification IA (optionnelle)** : en renseignant une clé OpenAI, chaque
+  critère est vérifié par le modèle **avant** la génération du PDF (résultat
+  cohérent ? verdict correct ?).
+- **Commentaire Soneka** : sous chaque résultat, un commentaire synthétique
+  (nom + distance ; typologie pour les services) avec bouton copier.
 
-- La fiche du PDF inclut des **contrôles automatiques** (nom suspect type
-  découpage administratif, vitesse de marche anormale, distances incohérentes).
-- En option, un champ « clé API Anthropic » active une **vérification du
-  résultat par Claude Haiku** (~0,2 centime/rapport). Sans clé, tout marche.
-- Distribution : joindre le fichier à une page Notion avec deux lignes de mode
-  d'emploi ; chacun le garde sur son bureau.
-
-### 2. 🤖 Claude Code — capture Google Maps réelle (couvert par l'abonnement)
-
-Dans une session Claude Code sur ce repo :
-
-```
-/s6 4 rue de la Pompe, 75116 Paris
-```
-
-Claude exécute le pipeline, **capture le vrai Google Maps** (itinéraire piéton)
-dans un navigateur invisible et l'intègre au PDF, puis vérifie la cohérence.
-En session cloud (claude.ai/code), l'environnement doit autoriser le trafic
-sortant (google.com, openstreetmap.org) — sinon bascule automatique sur la
-carte OSM.
-
-### 3. 💻 Ligne de commande / serveur interne
+### Lancer en local
 
 ```bash
 pip install -r requirements.txt
-python3 skills/s6-biodiversite/scripts/s6_auto.py "adresse de l'actif" --out rapport.pdf
+streamlit run webapp/streamlit_app.py
 ```
 
-Ou héberger la page web pour l'équipe : `python3 webapp/app.py` puis ouvrir
-`http://<machine>:8517`.
+### Clés (aucune n'est stockée ni committée)
+
+- **Geoapify** : lue dans les *Secrets* Streamlit sous `GEOAPIFY_KEY`
+  (Manage app → Settings → Secrets : `GEOAPIFY_KEY = "..."`). Sans clé, le
+  géocodage BAN fonctionne quand même et les POI/itinéraires retombent sur OSM.
+- **OpenAI** : saisie dans l'UI par l'utilisateur (facultatif, pour la vérif IA).
+
+Dépôt : `raphael846/Grille-ESG-V0`. Chaque `push` sur `main` redéploie l'app.
+
+---
+
+## Les autres interfaces (S6 uniquement, socle d'origine)
+
+Ces trois voies utilisent le socle OpenStreetMap (Nominatim + Overpass + OSRM)
+et, quand un navigateur Chromium et le réseau le permettent, une **capture
+Google Maps réelle** de l'itinéraire piéton intégrée au PDF.
+
+1. **Page autonome** — `webapp/s6.html` : un fichier à double-cliquer, zéro
+   installation. Optionnellement : clé Geoapify (côté navigateur) et
+   vérification par Claude Haiku.
+2. **Serveur Flask** — `python3 webapp/app.py` puis `http://localhost:8517`.
+3. **Ligne de commande** :
+   ```bash
+   python3 skills/s6-biodiversite/scripts/s6_auto.py "adresse" --out S6.pdf [--locataire "Nom"]
+   python3 skills/s6-biodiversite/scripts/s2_auto.py "adresse" --out S2.pdf
+   python3 skills/s6-biodiversite/scripts/s7_auto.py "adresse" --out S7.pdf
+   ```
+   Dans une session Claude Code : `/s6`, `/s2`, `/s7`, ou `/esg` pour les trois.
 
 ---
 
 ## La preuve dans le PDF (toujours présente, jamais inventée)
 
-Le PDF intègre la meilleure preuve disponible, avec une légende honnête :
+Le PDF intègre la meilleure preuve disponible, avec une légende honnête sur sa
+provenance :
 
-1. **Capture d'écran Google Maps** de l'itinéraire piéton (voie Claude Code /
-   CLI, nécessite navigateur + réseau) ;
-2. **Carte OpenStreetMap** avec l'itinéraire piéton réel ;
-3. **Carte schématique** générée depuis les coordonnées réelles (sans réseau).
+1. Carte **Geoapify** avec l'itinéraire piéton réel (app Streamlit) ;
+2. sinon carte **OpenStreetMap** (tuiles + itinéraire OSRM) ;
+3. sinon capture **Google Maps** headless (voies CLI / Flask / page autonome) ;
+4. sinon carte schématique générée hors-ligne à partir des coordonnées réelles.
 
-Dans tous les cas, le PDF contient le **lien Google Maps vérifiable en un
-clic** — c'est lui qui fait foi. Distances et temps proviennent toujours d'une
-source citée (routeur piéton OpenStreetMap), jamais d'une estimation non
-signalée.
+Dans tous les cas le PDF contient le **lien Google Maps vérifiable en un clic**
+— c'est lui qui fait foi. Distances et temps proviennent toujours d'une source
+citée (routeur piéton), jamais d'une estimation non signalée.
+
+---
 
 ## Structure du dépôt
 
 ```
-webapp/s6.html                     ← le fichier autonome pour l'équipe
-webapp/app.py                      ← la même chose en serveur web (Flask)
-skills/s6-biodiversite/SKILL.md    ← les règles du skill pour Claude
+webapp/streamlit_app.py            ← l'app Greenfast (S2/S6/S7, Geoapify, OpenAI, Soneka)
+webapp/geoapify_s6.py              ← couche Geoapify/BAN (patche les pipelines pour l'app)
+webapp/s6.html                     ← page autonome S6 (client-side)
+webapp/app.py                      ← serveur Flask S6
 skills/s6-biodiversite/scripts/
-  s6_auto.py                       ← pipeline complet : adresse → PDF
+  s6_auto.py                       ← pipeline S6 : adresse → cfg
+  s2_auto.py                       ← pipeline S2 (services)
+  s7_auto.py                       ← pipeline S7 (transports)
   build_report.py                  ← génération du PDF + choix de la preuve
   capture_maps.py                  ← capture Google Maps (Chromium headless)
-.claude/commands/s6.md             ← la commande /s6 de Claude Code
-requirements.txt                   ← dépendances Python (voies 2 et 3)
+.claude/commands/{esg,s6,s2,s7}.md ← commandes Claude Code
+requirements.txt                   ← dépendances Python
 ```
 
-## Historique / fiabilisation
+---
 
-Ce projet est né d'un skill qui promettait des captures d'écran impossibles à
-tenir (les captures de l'outil navigateur de Claude ne sont pas des fichiers).
-Il a été fiabilisé itérativement : preuve toujours intégrée avec provenance
-honnête, rotation de serveurs cartographiques quand ils saturent, préférence
-aux parcs nommés sous le seuil, détection des artefacts OpenStreetMap (cas
-« Swords-Forrest DED 1986 »), contrôles de cohérence imprimés dans le PDF.
+## Intégrité
+
+- Distances, temps et coordonnées viennent toujours d'une source vérifiable
+  (BAN, Geoapify/OSM), citée dans le PDF ; jamais inventés.
+- La légende de la carte dit toujours ce qu'elle est vraiment (Geoapify / OSM /
+  Google Maps / schéma hors-ligne) et si le tracé est l'itinéraire réel ou une
+  liaison directe de repli.
+- Les recherches de rapports ne committent rien : PDF générés hors du dépôt,
+  `*.pdf` est dans le `.gitignore`.
