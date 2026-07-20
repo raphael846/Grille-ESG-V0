@@ -329,22 +329,30 @@ st.caption("Instruction automatisée de la grille ESG d'un actif — critères "
            "géolocalisés services (S2), biodiversité (S6) et mobilité (S7)")
 koala_walk()
 
+# Vérification IA en option (hors formulaire : le toggle révèle le champ de clé
+# immédiatement — dans un st.form il ne réagirait qu'à la soumission).
+verif_ia = st.toggle(
+    "Vérification IA du résultat (OpenAI)", value=False,
+    help="Si activé, chaque critère est vérifié par un modèle OpenAI AVANT la "
+         "génération du PDF (résultat cohérent ? verdict correct ?).")
+openai_key = ""
+if verif_ia:
+    openai_key = st.text_input(
+        "Clé API OpenAI", type="password", placeholder="sk-...",
+        help="La clé n'est ni stockée ni journalisée ; pensez à fixer une limite "
+             "de dépense sur platform.openai.com.")
+
 with st.form("esg"):
     st.markdown("**Critères à instruire** (cochez-en un ou plusieurs) :")
     checks_ui = {k: st.checkbox(label, value=False) for k, label in CRITERES}
     address = st.text_input(
         "Adresse de l'actif",
-        placeholder="ex. 4 rue de la Pompe, 75116 Paris")
+        placeholder="ex. 4 rue de la Pompe, 75116 Paris",
+        help="Géocodage via l'API Adresse de l'État (France) ; POI et itinéraire "
+             "via Geoapify (clé lue dans les Secrets de l'app), sinon OpenStreetMap.")
     locataire = st.text_input(
         "Locataire / enseigne (optionnel)",
         placeholder="confirme le bâtiment, ou ancre le point si l'adresse est vague")
-    st.caption("Géocodage via l'API Adresse de l'État (France) ; POI et itinéraire "
-               "via Geoapify (clé lue dans les Secrets de l'app), sinon OpenStreetMap.")
-    openai_key = st.text_input(
-        "Clé API OpenAI (optionnelle — vérification IA de chaque critère avant le PDF)",
-        type="password", placeholder="sk-...")
-    st.caption("La clé n'est ni stockée ni journalisée ; pensez à fixer une "
-               "limite de dépense sur platform.openai.com.")
     submitted = st.form_submit_button("Générer le(s) rapport(s)")
 
 if submitted:
