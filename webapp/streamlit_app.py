@@ -77,12 +77,14 @@ def koala_walk():
           99%  { left: -64px; transform: scaleX(-1); }
           100% { left: -64px; transform: scaleX(1); }
         }
-        @keyframes koala-bob { 0%,100% { bottom: 12px; } 50% { bottom: 22px; } }
+        @keyframes koala-bob { 0%,100% { bottom: 12px; } 50% { bottom: 18px; } }
+        @keyframes koala-vanish { 0%,90% { opacity: 1; } 100% { opacity: 0; } }
         #koala-walker {
           position: fixed; bottom: 12px; left: -64px; font-size: 42px;
           z-index: 9999; pointer-events: none; will-change: left, bottom, transform;
-          animation: koala-walk 26s linear infinite,
-                     koala-bob 0.6s ease-in-out infinite;
+          animation: koala-walk 48s linear infinite,
+                     koala-bob 1.6s ease-in-out infinite,
+                     koala-vanish 30s ease-out forwards;
         }
         </style>
         <div id="koala-walker">🐨</div>
