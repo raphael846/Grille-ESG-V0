@@ -22,6 +22,8 @@ import urllib.parse
 
 import build_report
 import s6_auto
+import s2_auto
+import s7_auto
 
 _KEY = ""
 
@@ -33,6 +35,9 @@ last = {"geocode": "Nominatim (OpenStreetMap)", "places": "Overpass (OpenStreetM
 _orig_geocode = s6_auto.geocode
 _orig_green = s6_auto.find_green_spaces
 _orig_route = s6_auto.walk_route
+_orig_find_services = s2_auto.find_services      # S2
+_orig_find_transit = s7_auto.find_transit        # S7
+_orig_stop_lines = s7_auto.stop_lines            # S7
 
 
 def set_key(key):
@@ -111,6 +116,18 @@ def _ga_places(lat, lon, radius, categories, limit=50):
     return out
 
 
+def _places_retry(lat, lon, radius, categories, limit, tries=2):
+    """_ga_places avec quelques tentatives : un blip réseau ne doit pas faire
+    basculer tout un critère sur Overpass (qui est justement throttlé sur le cloud)."""
+    err = None
+    for _ in range(tries):
+        try:
+            return _ga_places(lat, lon, radius, categories, limit)
+        except Exception as e:
+            err = e
+    raise err
+
+
 def _ga_outline_point(place_id, lat, lon):
     """Point du contour Geoapify le plus proche de l'actif (l'API Places ne
     renvoie qu'un centre : le bord d'une grande plage/parc peut être bien plus
@@ -141,7 +158,7 @@ def find_green_spaces(lat, lon, radius):
         last["places"] = "Overpass (OpenStreetMap)"
         return _orig_green(lat, lon, radius)
     try:
-        feats = _ga_places(lat, lon, radius, "leisure.park,national_park,beach", 50)
+        feats = _places_retry(lat, lon, radius, "leisure.park,national_park,beach", 50)
         best = {}
         for p in feats:
             raw = p["raw"]
@@ -210,12 +227,136 @@ def walk_route(lat1, lon1, lat2, lon2):
     return _orig_route(lat1, lon1, lat2, lon2)
 
 
+# ---------------------------------------------------------------------------
+# S2 — services : Geoapify Places (par familles) -> repli Overpass
+# ---------------------------------------------------------------------------
+
+# Correspondance taxonomie Geoapify -> catégorie de la grille (le générique
+# « commercial » reste en dernier). Repris de webapp/s6.html.
+GA_CAT_LABEL = (
+    ("catering.restaurant", "Restaurant"), ("catering.fast_food", "Restaurant"),
+    ("catering.cafe", "Café"), ("catering.bar", "Bar"), ("catering.pub", "Bar"),
+    ("accommodation.hotel", "Hôtel"), ("accommodation.guest_house", "Hôtel"),
+    ("commercial.supermarket", "Supermarché"),
+    ("commercial.convenience", "Supermarché"),
+    ("commercial.books", "Librairie"),
+    ("education.school", "École"), ("education.kindergarten", "École"),
+    ("education.college", "École"), ("education.university", "École"),
+    ("healthcare", "Médecin / santé"),
+    ("service.financial", "Banque"),
+    ("commercial", "Commerce"),
+)
+
+
+def _ga_categorize(p):
+    # D'abord les tags OSM bruts (plus précis), sinon la taxonomie Geoapify.
+    cat = s2_auto.categorize(p["raw"])
+    if cat:
+        return cat
+    for prefix, label in GA_CAT_LABEL:
+        for c in p["categories"]:
+            if c == prefix or c.startswith(prefix + "."):
+                return label
+    return None
+
+
+def find_services(lat, lon, radius):
+    if not _KEY:
+        last["places"] = "Overpass (OpenStreetMap)"
+        return _orig_find_services(lat, lon, radius)
+    try:
+        # Une requête PAR famille : l'API Places ne renvoie qu'une famille quand
+        # on en combine plus de deux (constaté aussi côté s6.html).
+        groups = ["catering", "commercial",
+                  "accommodation.hotel,accommodation.guest_house",
+                  "education", "healthcare"]
+        feats = []
+        for g in groups:
+            try:
+                feats += _ga_places(lat, lon, radius, g, 100)
+            except Exception:
+                pass
+        out = []
+        for p in feats:
+            cat = _ga_categorize(p)
+            nm = p["name"] or p["raw"].get("name")
+            if not cat or not nm:
+                continue
+            out.append({"name": nm, "cat": cat, "lat": p["lat"], "lon": p["lon"],
+                        "crow_m": build_report.haversine_m(lat, lon,
+                                                           p["lat"], p["lon"])})
+        if out:
+            last["places"] = "Geoapify Places"
+            return out, False
+    except Exception:
+        pass
+    last["places"] = "Overpass (OpenStreetMap)"
+    return _orig_find_services(lat, lon, radius)
+
+
+# ---------------------------------------------------------------------------
+# S7 — transports : Geoapify Places (public_transport) -> repli Overpass
+# ---------------------------------------------------------------------------
+
+_CAT_MODE = {"bus": "Bus", "tram": "Tram", "subway": "Métro", "train": "Train",
+             "light_rail": "Train", "ferry": "Ferry"}
+
+
+def find_transit(lat, lon, radius=s7_auto.THRESHOLD_M):
+    if _KEY:
+        try:
+            feats = _places_retry(lat, lon, radius, "public_transport", 200)
+            stops, ref_lines = [], {}
+            for p in feats:
+                t = p["raw"]
+                mode = s7_auto.mode_of_stop(t)
+                if not mode:
+                    for c in p["categories"]:
+                        parts = c.split(".")
+                        m = _CAT_MODE.get(parts[1]) if len(parts) > 1 else None
+                        if m:
+                            mode = m
+                            break
+                if not mode:
+                    continue
+                stops.append({
+                    "name": p["name"] or t.get("name") or f"Arrêt {mode.lower()}",
+                    "mode": mode,
+                    "id": t.get("osm_id") if t.get("osm_type") in ("node", "n") else None,
+                    "lat": p["lat"], "lon": p["lon"],
+                    "crow_m": build_report.haversine_m(lat, lon, p["lat"], p["lon"]),
+                })
+                for ref in (t.get("route_ref") or "").replace(",", ";").split(";"):
+                    ref = ref.strip()
+                    if ref:
+                        ref_lines[(mode, ref)] = {"mode": mode, "ref": ref}
+            if stops:
+                last["places"] = "Geoapify Places"
+                return stops, list(ref_lines.values()), (len(ref_lines) == 0)
+        except Exception:
+            pass
+    last["places"] = "Overpass (OpenStreetMap)"
+    return _orig_find_transit(lat, lon, radius)
+
+
+def stop_lines(stop):
+    # Geoapify n'expose pas les lignes par arrêt : renvoyer None fait basculer
+    # research() sur les lignes du secteur (issues des route_ref Geoapify),
+    # sans requête Overpass supplémentaire.
+    if _KEY:
+        return None
+    return _orig_stop_lines(stop)
+
+
 def source_prefix():
     """Préfixe honnête à substituer dans cfg['source'] après research()."""
     return f"{last['geocode']} + {last['places']}"
 
 
-# Installe les patches sur s6_auto (une seule fois, à l'import du module).
+# Installe les patches (une seule fois, à l'import du module).
 s6_auto.geocode = geocode
 s6_auto.find_green_spaces = find_green_spaces
 s6_auto.walk_route = walk_route
+s2_auto.find_services = find_services
+s7_auto.find_transit = find_transit
+s7_auto.stop_lines = stop_lines
