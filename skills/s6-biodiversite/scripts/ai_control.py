@@ -21,14 +21,20 @@ OPENAI_URL = "https://api.openai.com/v1/chat/completions"
 DEFAULT_MODEL = "gpt-4o-mini"
 
 
-def available():
-    """Vrai si une clé OpenAI est configurée. Sinon, aucun contrôle IA."""
-    return bool(os.environ.get("OPENAI_API_KEY"))
+def available(api_key=None):
+    """Vrai si une clé OpenAI est disponible (argument explicite ou variable
+    d'environnement). Sinon, aucun contrôle IA."""
+    return bool(api_key or os.environ.get("OPENAI_API_KEY"))
 
 
-def _call_openai(system, user, timeout=30):
-    """Appel minimal à l'API Chat Completions d'OpenAI, réponse JSON forcée."""
-    api_key = os.environ["OPENAI_API_KEY"]
+def _call_openai(system, user, api_key=None, timeout=30):
+    """Appel minimal à l'API Chat Completions d'OpenAI, réponse JSON forcée.
+
+    La clé peut être passée explicitement (usage web : jamais stockée dans
+    l'environnement du serveur partagé) ou lue dans OPENAI_API_KEY (usage
+    local via Claude Code).
+    """
+    api_key = api_key or os.environ.get("OPENAI_API_KEY")
     model = os.environ.get("OPENAI_MODEL", DEFAULT_MODEL)
     payload = {
         "model": model,
@@ -77,15 +83,17 @@ S6_SYSTEM = (
 )
 
 
-def review_s6(cfg, timeout=30):
+def review_s6(cfg, api_key=None, timeout=30):
     """Avis IA sur le résultat S6.
 
-    Retourne None si aucune clé n'est configurée (le pipeline ne change pas).
-    Sinon un dict {critere, statut, raison, confiance, modele}. Le statut vaut
-    « confirme », « doute » ou « indisponible » (clé présente mais appel
-    échoué). Ne modifie jamais le score.
+    Retourne None si aucune clé n'est disponible (le pipeline ne change pas).
+    Sinon un dict {critere, statut, raison, confiance, alternative, modele}. Le
+    statut vaut « confirme », « doute » ou « indisponible » (clé présente mais
+    appel échoué). Ne modifie jamais le score.
+
+    `api_key` : clé explicite (usage web). Sinon, lue dans OPENAI_API_KEY.
     """
-    if not available():
+    if not available(api_key):
         return None
     gs = cfg["green_space"]
     # Candidats réels que l'IA pourra proposer en alternative (jamais autre chose)
@@ -111,7 +119,8 @@ def review_s6(cfg, timeout=30):
             + json.dumps(facts, ensure_ascii=False, indent=2))
     valid_names = {c["name"] for c in candidates}
     try:
-        verdict, model = _call_openai(S6_SYSTEM, user, timeout=timeout)
+        verdict, model = _call_openai(S6_SYSTEM, user, api_key=api_key,
+                                      timeout=timeout)
         statut = str(verdict.get("statut", "")).lower()
         # Ne garder l'alternative que si elle désigne un VRAI candidat (garde-fou
         # anti-invention côté code, en plus de la consigne au modèle).

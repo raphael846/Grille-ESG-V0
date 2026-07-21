@@ -35,6 +35,7 @@ import streamlit as st
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_HERE, "..", "skills", "s6-biodiversite", "scripts"))
 sys.path.insert(0, _HERE)  # pour importer geoapify_s6 (même dossier)
+import ai_control     # noqa: E402  -> contrôle IA S6 (alternative + décision)
 import build_report  # noqa: E402
 import s6_auto        # noqa: E402  -> S6
 import s2_auto        # noqa: E402  -> S2 (research/gather_proofs/build_pdf)
@@ -137,14 +138,17 @@ def geocode_candidates(address, limit=5):
     return out
 
 
-def research_only(kind, address, locataire):
+def research_only(kind, address, locataire, force_green_space=None):
     """Étape 1 — recherche (géocodage + POI + itinéraires), SANS générer le PDF.
 
     Renvoie cfg. La vérification IA tourne sur ce cfg avant la création du PDF.
     Géocodage/POI/itinéraire via Geoapify/BAN (patches geoapify_s6, repli OSM).
+    `force_green_space` (S6 seulement) impose un espace vert réel désigné —
+    sert à appliquer une alternative validée par l'utilisateur.
     """
     if kind == "S6":
-        cfg = s6_auto.research(address, locataire=locataire)
+        cfg = s6_auto.research(address, locataire=locataire,
+                               force_green_space=force_green_space)
     elif kind == "S2":
         cfg = s2_auto.research(address, locataire=locataire)
     else:  # S7
@@ -189,6 +193,52 @@ def build_comment(kind, cfg):
     det = ", ".join(f"{s['mode'].lower()} {s['name']} ({s['walk_distance_m']} m)"
                     for s in cfg["services"])
     return f"S7 — Mobilité : {verdict} ({score}/{smax}) — {det or 'aucun arrêt'}."
+
+
+def _regen_s6_pdf(r, cfg):
+    """Régénère le PDF + le commentaire S6 d'un résultat à partir d'un cfg mis à
+    jour, et renvoie le résultat modifié."""
+    date_str = cfg.get("analysis_date", "").replace("/", "")
+    stem = f"S6_{slugify(r['address'])}" + (f"_{date_str}" if date_str else "")
+    out = os.path.join(tempfile.mkdtemp(prefix="esgst_"), f"{stem}.pdf")
+    proof = generate_pdf("S6", cfg, out)
+    with open(out, "rb") as f:
+        pdf_bytes = f.read()
+    r.update(cfg=cfg, pdf_bytes=pdf_bytes, filename=os.path.basename(out),
+             proof=proof, comment=build_comment("S6", cfg))
+    return r
+
+
+def apply_s6_decision(r, decision):
+    """Applique la décision de l'utilisateur face à un doute IA sur le S6.
+
+    action = "alternative" (retenir un espace réel désigné, 4/4 conservé),
+    "downgrade" (score forcé à 0/4) ou "ignore" (garder tel quel). Toute
+    décision est explicite : rien n'est changé sans clic de l'utilisateur.
+    """
+    if r.get("kind") != "S6" or "cfg" not in r:
+        return r
+    action = decision.get("action")
+    if action == "ignore":
+        r["cfg"].setdefault("ai_control", {})["resolution"] = "conservé tel quel"
+        return r
+
+    geoapify_s6.set_key(geoapify_key_from_secrets())
+    prev_ai = dict(r.get("cfg", {}).get("ai_control") or {})
+    if action == "alternative":
+        cfg = research_only("S6", r["address"], r.get("locataire"),
+                            force_green_space=decision["name"])
+        prev_ai["resolution"] = f"espace remplacé par « {decision['name']} »"
+        cfg["ai_control"] = prev_ai
+    else:  # downgrade -> 0/4
+        cfg = r["cfg"]
+        cfg["score"] = 0
+        cfg["score_overridden"] = True
+        cfg["override_note"] = (decision.get("note")
+                                or "espace jugé non valable au contrôle IA")
+        prev_ai["resolution"] = "score abaissé à 0/4 après contrôle"
+        cfg["ai_control"] = prev_ai
+    return _regen_s6_pdf(r, cfg)
 
 
 def _verif_prompt(kind, cfg):
@@ -273,7 +323,7 @@ def verify_with_openai(kind, cfg, key):
     return json.loads(resp.choices[0].message.content)
 
 
-def render_result(r):
+def render_result(r, idx=0):
     """Affiche un résultat de critère (bandeau, PDF, commentaire Soneka, détail)."""
     st.divider()
     if r.get("error"):
@@ -326,7 +376,44 @@ def render_result(r):
             for c in checks:
                 (st.warning if c.startswith("ATTENTION") else st.info)(c)
 
-    if r.get("verif"):
+    # Contrôle IA du S6 : avis + éventuelle alternative réelle, avec boutons de
+    # décision (rien n'est changé sans un clic explicite de l'utilisateur).
+    if kind == "S6" and cfg.get("ai_control"):
+        ai = cfg["ai_control"]
+        statut = ai.get("statut")
+        if ai.get("resolution"):
+            st.info(f"Contrôle IA — décision appliquée : {ai['resolution']}")
+        elif statut == "confirme":
+            st.success(f"Contrôle IA — confirmé : {ai.get('raison', '')} "
+                       f"(confiance {ai.get('confiance', '?')})")
+        elif statut == "doute":
+            st.warning(f"Contrôle IA — doute : {ai.get('raison', '')} "
+                       f"(confiance {ai.get('confiance', '?')}). "
+                       f"Choisissez la suite :")
+            alt = ai.get("alternative")
+            cols = st.columns(3)
+            if alt and cols[0].button(
+                    f"✅ Retenir « {alt['name']} » (garder 4/4)",
+                    key=f"alt_{idx}", use_container_width=True):
+                st.session_state["s6_decision"] = {
+                    "idx": idx, "action": "alternative", "name": alt["name"]}
+                st.rerun()
+            if cols[1].button("⚠️ Confirmer le doute → 0/4", key=f"down_{idx}",
+                              use_container_width=True):
+                st.session_state["s6_decision"] = {
+                    "idx": idx, "action": "downgrade", "note": ai.get("raison", "")}
+                st.rerun()
+            if cols[2].button("↩️ Ignorer (garder tel quel)", key=f"ign_{idx}",
+                              use_container_width=True):
+                st.session_state["s6_decision"] = {"idx": idx, "action": "ignore"}
+                st.rerun()
+            if alt:
+                st.caption(f"Alternative proposée par l'IA (espace réel trouvé) : "
+                           f"{alt.get('raison', '')}")
+        elif statut == "indisponible":
+            st.caption(f"Contrôle IA indisponible ({ai.get('raison', '')}) — "
+                       "le rapport reste valable.")
+    elif r.get("verif"):
         v = r["verif"]
         (st.success if v.get("coherent") else st.warning)(
             f"Vérification OpenAI — cohérent : {'oui' if v.get('coherent') else 'non'} "
@@ -422,7 +509,14 @@ if st.session_state.get("busy"):
             if p["key"]:
                 with st.spinner(f"{kind} — vérification IA du résultat…"):
                     try:
-                        verif = verify_with_openai(kind, cfg, p["key"])
+                        if kind == "S6":
+                            # Contrôle intelligent : avis + alternative réelle
+                            # éventuelle. Clé passée en argument (jamais stockée
+                            # dans l'environnement du serveur partagé).
+                            cfg["ai_control"] = ai_control.review_s6(
+                                cfg, api_key=p["key"])
+                        else:
+                            verif = verify_with_openai(kind, cfg, p["key"])
                     except Exception as e:
                         verif_error = str(e)
 
@@ -444,6 +538,7 @@ if st.session_state.get("busy"):
                 "filename": os.path.basename(out), "sources": sources,
                 "comment": build_comment(kind, cfg), "verif": verif,
                 "verif_error": verif_error,
+                "address": p["address"], "locataire": p["locataire"],
             })
     finally:
         st.session_state["busy"] = False
@@ -454,6 +549,21 @@ if st.session_state.get("busy"):
 
 if st.session_state.pop("just_finished", False):
     st.balloons()  # confettis une fois la recherche terminée
+
+# Décision de l'utilisateur sur un doute IA du S6 (clic sur un bouton) : on
+# régénère le résultat concerné, puis on réaffiche.
+_decision = st.session_state.pop("s6_decision", None)
+if _decision is not None:
+    _res = st.session_state.get("results", [])
+    _i = _decision.get("idx", -1)
+    if 0 <= _i < len(_res):
+        with st.spinner("S6 — application de votre décision…"):
+            try:
+                _res[_i] = apply_s6_decision(_res[_i], _decision)
+            except Exception as e:
+                _res[_i]["error"] = f"application de la décision impossible : {e}"
+        st.session_state["results"] = _res
+    st.rerun()
 
 _results = st.session_state.get("results", [])
 _pdfs = [r for r in _results if r.get("pdf_bytes")]
@@ -466,5 +576,5 @@ if len(_pdfs) > 1:
                        data=_buf.getvalue(), file_name="Greenfast_rapports.zip",
                        mime="application/zip", key="dl_all")
 
-for r in _results:
-    render_result(r)
+for _idx, r in enumerate(_results):
+    render_result(r, _idx)
