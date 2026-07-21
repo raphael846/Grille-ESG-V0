@@ -147,8 +147,10 @@ def research_only(kind, address, locataire, force_green_space=None):
     sert à appliquer une alternative validée par l'utilisateur.
     """
     if kind == "S6":
-        cfg = s6_auto.research(address, locataire=locataire,
-                               force_green_space=force_green_space)
+        kwargs = {"locataire": locataire}
+        if force_green_space:  # ne pas passer l'argument pour un run normal
+            kwargs["force_green_space"] = force_green_space
+        cfg = s6_auto.research(address, **kwargs)
     elif kind == "S2":
         cfg = s2_auto.research(address, locataire=locataire)
     else:  # S7
