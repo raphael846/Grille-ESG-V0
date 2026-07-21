@@ -272,6 +272,10 @@ def build_pdf(cfg, proof_images, out_pdf):
     validated = park["walk_distance_m"] <= threshold
     score = cfg.get("score", 4 if validated else 0)
     score_max = cfg.get("score_max", 4)
+    # Score forcé par l'utilisateur (après un doute du contrôle IA) : le verdict
+    # affiché suit alors le score décidé, pas seulement la distance.
+    if cfg.get("score_overridden"):
+        validated = score >= score_max
 
     styles = getSampleStyleSheet()
     st_title = ParagraphStyle("t", parent=styles["Title"], fontSize=16, spaceAfter=1)
@@ -331,6 +335,17 @@ def build_pdf(cfg, proof_images, out_pdf):
     ]
     if cfg.get("checks"):
         rows.append(["Contrôles automatiques", " ; ".join(cfg["checks"])])
+    ai = cfg.get("ai_control")
+    if ai:
+        prefix = {"confirme": "Confirmé", "doute": "DOUTE",
+                  "indisponible": "Indisponible"}.get(ai["statut"], "")
+        detail = f"{prefix} — {ai['raison']}" if ai.get("raison") else prefix
+        if ai.get("confiance"):
+            detail += f" (confiance {ai['confiance']})"
+        if ai.get("alternative"):
+            detail += (f". Alternative envisagée : "
+                       f"{ai['alternative'].get('name', '')}")
+        rows.append(["Contrôle IA", detail])
     table = Table([[Paragraph(f"<b>{k}</b>", st_body), Paragraph(str(v), st_body)]
                    for k, v in rows],
                   colWidths=[45 * mm, doc.width - 45 * mm])
@@ -376,6 +391,8 @@ def build_pdf(cfg, proof_images, out_pdf):
                  f"{threshold / 1000:g} km à pied ({park['name']} est à "
                  f"{park['walk_distance_m']} m). Le critère S6 n'est pas validé : "
                  f"{score}/{score_max}.")
+    if cfg.get("override_note"):
+        concl += (f" Score ajusté après contrôle : {cfg['override_note']}.")
     story.append(Paragraph(concl, st_body))
 
     doc.build(story)

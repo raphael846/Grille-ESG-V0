@@ -25,6 +25,7 @@ import sys
 import urllib.parse
 import urllib.request
 
+import ai_control
 import build_report
 
 UA = {"User-Agent": "s6-skill/1.0 (rapport ESG interne)"}
@@ -300,7 +301,8 @@ def refine_park_target(park, lat, lon):
                                                            p[0], p[1])), kind
 
 
-def research(address, radius=1200, candidates=5, locataire=None):
+def research(address, radius=1200, candidates=5, locataire=None,
+             force_green_space=None):
     """Construit la config complète du rapport à partir de la seule adresse.
 
     `locataire` (optionnel) : nom d'un locataire/enseigne de l'actif. Sert à
@@ -364,10 +366,31 @@ def research(address, radius=1200, candidates=5, locataire=None):
                    for s in named + unnamed]
         evaluated = [(f.result()[0], f.result()[1], f.result()[2], s)
                      for s, f in futures]
+    # Liste des espaces verts RÉELS trouvés autour de l'actif. Sert au
+    # contrôle IA : s'il doute du parc retenu, il ne peut proposer une
+    # alternative QUE parmi ces vrais candidats — jamais un parc inventé.
+    candidates_list = [
+        {"name": s["name"], "type": s["type"], "named": s["named"],
+         "walk_distance_m": d, "walk_time_min": m,
+         "lat": s["lat"], "lon": s["lon"]}
+        for (d, m, _src, s) in sorted(evaluated, key=lambda e: e[0])
+    ]
     named_ok = [e for e in evaluated if e[3]["named"] and e[0] <= threshold]
     any_ok = [e for e in evaluated if e[0] <= threshold]
-    dist, mins, route_src, park = min(named_ok or any_ok or evaluated,
-                                      key=lambda e: e[0])
+    if force_green_space:
+        # Retenir explicitement un candidat réel désigné (ex. alternative
+        # validée par l'utilisateur après un doute du contrôle IA).
+        fmatch = [e for e in evaluated
+                  if force_green_space.lower() in e[3]["name"].lower()]
+        if not fmatch:
+            raise RuntimeError(
+                f"espace vert imposé « {force_green_space} » introuvable parmi "
+                f"les candidats réels de cette adresse — ne rien inventer.")
+        dist, mins, route_src, park = min(fmatch, key=lambda e: e[0])
+        checks.append(f"espace vert imposé manuellement : « {park['name']} »")
+    else:
+        dist, mins, route_src, park = min(named_ok or any_ok or evaluated,
+                                          key=lambda e: e[0])
     # Viser l'entrée (ou le contour) du parc retenu, puis re-mesurer
     refined = refine_park_target(park, lat, lon)
     if refined:
@@ -441,6 +464,7 @@ def research(address, radius=1200, candidates=5, locataire=None):
             "lon": park["lon"],
             "walk_distance_m": dist,
             "walk_time_min": mins,
+            "named": park["named"],
         },
         "source": f"OpenStreetMap (Nominatim + Overpass) ; {route_src} ; "
                   f"consulté le {today}",
@@ -450,6 +474,7 @@ def research(address, radius=1200, candidates=5, locataire=None):
         "score_max": 4,
         "threshold_m": 1000,
         "checks": checks,
+        "candidates": candidates_list[:8],
     }
 
 
@@ -465,19 +490,67 @@ def main():
                     help="nom d'un locataire/enseigne de l'actif (confirme le "
                          "bâtiment, ou sert d'ancre si l'adresse est imprécise)")
     ap.add_argument("--save-config", help="enregistre la config JSON produite")
+    ap.add_argument("--force-green-space", default=None,
+                    help="imposer un espace vert précis (parmi les candidats "
+                         "réels) — sert à appliquer une alternative validée "
+                         "après un doute du contrôle IA")
+    ap.add_argument("--force-score", type=int, choices=(0, 4), default=None,
+                    help="forcer le score final (0 ou 4) après validation de "
+                         "l'utilisateur suite à un doute du contrôle IA")
+    ap.add_argument("--override-note", default=None,
+                    help="explication à inscrire dans le PDF quand le score "
+                         "est forcé (ex. « parc jugé privé au contrôle »)")
     args = ap.parse_args()
 
     try:
         cfg = research(args.address, radius=args.radius,
-                       locataire=args.locataire)
+                       locataire=args.locataire,
+                       force_green_space=args.force_green_space)
     except Exception as e:
         sys.exit(f"Recherche impossible : {e}")
+
+    if args.force_score is not None:
+        cfg["score"] = args.force_score
+        cfg["score_overridden"] = True
+        if args.override_note:
+            cfg["override_note"] = args.override_note
     for c in cfg.get("checks", []):
         print(f"Contrôle : {c}")
 
     park = cfg["green_space"]
     print(f"Espace vert retenu : {park['name']} — {park['walk_distance_m']} m "
           f"à pied ({park['walk_time_min']} min)")
+
+    # Contrôle IA optionnel : n'a lieu que si une clé OpenAI est configurée.
+    # Sans clé, review_s6 renvoie None et rien ne change. Le contrôle ne
+    # modifie JAMAIS le score : en cas de doute, c'est l'assistant qui relaie
+    # la question à l'utilisateur.
+    verdict = ai_control.review_s6(cfg)
+    if verdict:
+        cfg["ai_control"] = verdict
+        suffix = (f"(confiance {verdict['confiance']}, modèle "
+                  f"{verdict['modele']})")
+        if verdict["statut"] == "confirme":
+            print(f"Contrôle IA : confirmé — {verdict['raison']} {suffix}")
+        elif verdict["statut"] == "doute":
+            print(f"Contrôle IA : DOUTE — {verdict['raison']} {suffix}")
+            alt = verdict.get("alternative")
+            if alt:
+                print(f"  → Alternative RÉELLE proposée : « {alt['name']} » "
+                      f"({alt.get('raison', '')}). Le 4/4 peut être conservé "
+                      f"en retenant cet espace à la place.")
+                print(f"    Pour l'appliquer après accord de l'utilisateur : "
+                      f"relancer avec --force-green-space \"{alt['name']}\".")
+            else:
+                print("  → Aucune alternative valable parmi les espaces verts "
+                      "réels trouvés. Si le doute est confirmé, le score "
+                      "devrait passer à 0/4.")
+            print("  → Le score du programme n'est PAS modifié pour l'instant. "
+                  "L'assistant doit demander à l'utilisateur avant tout "
+                  "changement (jamais inventer un espace).")
+        else:
+            print(f"Contrôle IA : indisponible — {verdict['raison']}")
+
     if args.save_config:
         with open(args.save_config, "w", encoding="utf-8") as f:
             json.dump(cfg, f, ensure_ascii=False, indent=2)
