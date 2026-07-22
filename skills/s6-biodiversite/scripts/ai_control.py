@@ -21,6 +21,18 @@ OPENAI_URL = "https://api.openai.com/v1/chat/completions"
 DEFAULT_MODEL = "gpt-4o-mini"
 
 
+# Une « Place / Parvis / Rond-point / Esplanade / Cours » est le plus souvent
+# minérale : jamais acceptée comme alternative d'espace vert S6 (garde-fou en
+# plus de la consigne au modèle).
+_NON_GREEN_PREFIXES = ("place ", "placette ", "parvis ", "rond-point",
+                       "rond point", "esplanade ", "cours ")
+
+
+def _looks_mineral(name):
+    n = (name or "").strip().lower()
+    return any(n.startswith(p) for p in _NON_GREEN_PREFIXES)
+
+
 def available(api_key=None):
     """Vrai si une clé OpenAI est disponible (argument explicite ou variable
     d'environnement). Sinon, aucun contrôle IA."""
@@ -58,23 +70,25 @@ def _call_openai(system, user, api_key=None, timeout=30):
 
 
 S6_SYSTEM = (
-    "Tu es un contrôleur qualité ESG. Un programme automatique a retenu un "
-    "espace vert comme preuve du critère S6 : existe-t-il un espace vert "
-    "PRATICABLE — parc, jardin public, square en accès libre — à moins d'1 km "
-    "à pied d'un actif immobilier ? Ton rôle est de dire si ce choix est "
-    "crédible, SANS recalculer la distance (fais confiance au programme pour "
-    "la distance). Repère surtout les cas douteux : espace en réalité privé "
-    "ou d'accès restreint ; objet qui n'est pas un vrai espace vert aménagé "
-    "praticable (bois/forêt sans aménagement, terrain vague, rond-point "
-    "planté, cimetière, champ) ; espace sans nom donc difficile à vérifier.\n"
-    "Si tu as un doute sur l'espace retenu, cherche une ALTERNATIVE dans la "
-    "liste 'candidats_alternatifs' fournie : un autre espace, plus crédible "
-    "comme espace vert public praticable, ET dont la distance est au maximum "
-    "le seuil. RÈGLE ABSOLUE : tu ne peux proposer qu'un candidat présent "
-    "dans cette liste, en recopiant EXACTEMENT son champ 'name'. Tu n'as pas "
-    "le droit d'inventer un lieu qui n'y figure pas. Si aucun candidat de la "
-    "liste n'est crédible sous le seuil, l'alternative est null.\n"
-    "En cas de doute réel, dis-le ; sinon confirme. "
+    "Tu es un contrôleur qualité ESG. Critère S6 (BINAIRE : validé ou non) : "
+    "existe-t-il UN espace vert praticable — parc, jardin public, square en "
+    "accès libre — à moins d'1 km à pied de l'actif ? Un programme a retenu "
+    "un espace. Ton rôle : CONFIRMER PAR DÉFAUT. Ne doute que s'il y a une "
+    "raison SÉRIEUSE que le critère ne soit pas rempli.\n"
+    "NE DOUTE PAS pour ces raisons (ce ne sont PAS des doutes → confirme) : un "
+    "autre espace vert plus proche existe ; l'espace pourrait être « mieux » ; "
+    "le nom t'est inconnu ; incertitude vague. Si l'espace retenu est un vrai "
+    "parc/jardin/square/bois/promenade crédible, CONFIRME, même si un autre "
+    "est plus proche.\n"
+    "DOUTE seulement si l'espace retenu n'est vraisemblablement PAS un espace "
+    "vert public praticable : lieu privé ou d'accès restreint ; place/parvis/"
+    "rond-point/esplanade MINÉRAL (pas de la vraie verdure) ; cimetière, "
+    "terrain vague, champ ; ou distance manifestement au-delà d'1 km.\n"
+    "Ne propose une ALTERNATIVE que si tu DOUTES vraiment de l'espace retenu, "
+    "et seulement un candidat de 'candidats_alternatifs' qui est un espace "
+    "vert PLUS crédible (jamais une place minérale, jamais moins crédible "
+    "qu'un vrai parc nommé), sous le seuil. Recopie EXACTEMENT son 'name'. "
+    "N'invente jamais. Sinon alternative=null.\n"
     'Réponds STRICTEMENT en JSON : {"statut": "confirme" ou "doute", '
     '"raison": "une phrase courte en français", '
     '"confiance": "haute" ou "moyenne" ou "basse", '
@@ -125,7 +139,8 @@ def review_s6(cfg, api_key=None, timeout=30):
         # Ne garder l'alternative que si elle désigne un VRAI candidat (garde-fou
         # anti-invention côté code, en plus de la consigne au modèle).
         alt = verdict.get("alternative") or None
-        if alt and alt.get("name") not in valid_names:
+        if alt and (alt.get("name") not in valid_names
+                    or _looks_mineral(alt.get("name", ""))):
             alt = None
         return {
             "critere": "S6",
@@ -151,19 +166,22 @@ def review_s6(cfg, api_key=None, timeout=30):
 # ---------------------------------------------------------------------------
 
 S2_SYSTEM = (
-    "Tu es un contrôleur qualité ESG. Critère S2 : au moins 3 services de "
-    "catégories DIFFÉRENTES à moins d'1 km à pied d'un actif. Un programme a "
-    "retenu une liste de services. Dis si ce choix est crédible, SANS "
-    "recalculer les distances (fais confiance au programme). Repère les cas "
-    "douteux : service qui n'existe vraisemblablement plus ou n'est pas de la "
-    "catégorie annoncée ; deux services en réalité de la même catégorie "
-    "comptés comme différents ; nom peu crédible.\n"
-    "Si tu doutes d'UN service retenu, cherche un remplaçant dans "
-    "'candidats_alternatifs' : un vrai service, distance ≤ seuil, d'une "
-    "catégorie qui conserve 3 catégories différentes une fois le service "
-    "douteux retiré. RÈGLE ABSOLUE : tu ne peux proposer qu'un candidat "
-    "présent dans la liste, en recopiant EXACTEMENT son 'name'. N'invente "
-    "jamais. Si aucun candidat ne convient, alternative=null.\n"
+    "Tu es un contrôleur qualité ESG. Critère S2 (BINAIRE : validé ou non) : "
+    "au moins 3 services de catégories DIFFÉRENTES à moins d'1 km à pied. Un "
+    "programme a retenu une liste. Ton rôle : CONFIRMER PAR DÉFAUT. Ne doute "
+    "que s'il y a une raison SÉRIEUSE que le critère ne soit pas rempli.\n"
+    "NE DOUTE PAS pour ces raisons (→ confirme) : un service est un hôtel, un "
+    "restaurant, une banque, une école, un commerce (ce sont TOUTES des "
+    "catégories S2 valables) ; le nom t'est inconnu ; il pourrait y avoir "
+    "mieux. Un établissement nommé issu d'OpenStreetMap/Geoapify existe très "
+    "probablement : ne le remets pas en cause sans raison forte.\n"
+    "DOUTE seulement si : il y a en réalité moins de 3 catégories DIFFÉRENTES "
+    "(ex. deux services retenus sont manifestement la même catégorie), ou un "
+    "service retenu est clairement faux (catégorie manifestement erronée).\n"
+    "Ne propose un REMPLACEMENT que si tu DOUTES vraiment, et seulement un "
+    "candidat réel de 'candidats_alternatifs' (sous le seuil) qui rétablit 3 "
+    "catégories différentes. Recopie EXACTEMENT son 'name'. N'invente jamais. "
+    "Sinon alternative=null.\n"
     'Réponds STRICTEMENT en JSON : {"statut": "confirme" ou "doute", '
     '"raison": "une phrase courte en français", '
     '"confiance": "haute" ou "moyenne" ou "basse", '
@@ -172,18 +190,22 @@ S2_SYSTEM = (
 )
 
 S7_SYSTEM = (
-    "Tu es un contrôleur qualité ESG. Critère S7 : transports en commun à "
-    "moins d'1 km à pied, avec au moins 2 MODES d'acheminement différents "
-    "(bus, tram, métro, train, ferry ; ou une desserte bus multi-lignes). Un "
-    "programme a retenu une desserte. Dis si c'est crédible, SANS recalculer "
-    "les distances. Repère : arrêt qui n'est pas du mode annoncé ; desserte "
-    "en réalité insuffisante (un seul mode réel) ; arrêt peu crédible.\n"
-    "Si tu doutes d'UN arrêt retenu, cherche un remplaçant dans "
-    "'candidats_alternatifs' : un vrai arrêt, distance ≤ seuil, dont le mode "
-    "aide à conserver au moins 2 modes différents. RÈGLE ABSOLUE : tu ne peux "
-    "proposer qu'un candidat présent dans la liste, en recopiant EXACTEMENT "
-    "son 'name'. N'invente jamais. Si aucun candidat ne convient, "
-    "alternative=null.\n"
+    "Tu es un contrôleur qualité ESG. Critère S7 (BINAIRE : validé ou non) : "
+    "transports en commun à moins d'1 km à pied, avec au moins 2 MODES "
+    "différents (bus, tram, métro, train, ferry) OU une desserte bus "
+    "multi-lignes. Un programme a retenu une desserte. Ton rôle : CONFIRMER "
+    "PAR DÉFAUT. Ne doute que s'il y a une raison SÉRIEUSE.\n"
+    "NE DOUTE PAS pour ces raisons (→ confirme) : une gare RER/Transilien est "
+    "un mode « train » valable ; un arrêt de bus est un mode « bus » valable ; "
+    "le nom t'est inconnu. Fais CONFIANCE au mode indiqué par le programme. "
+    "Dès qu'il y a au moins 2 modes différents (ou une desserte bus "
+    "multi-lignes), CONFIRME.\n"
+    "DOUTE seulement si : il n'y a en réalité qu'UN seul mode (et pas de bus "
+    "multi-lignes), ou un arrêt retenu est manifestement du mauvais mode.\n"
+    "Ne propose un REMPLACEMENT que si tu DOUTES vraiment, et seulement un "
+    "candidat réel de 'candidats_alternatifs' (sous le seuil) qui aide à avoir "
+    "2 modes différents. Recopie EXACTEMENT son 'name'. N'invente jamais. "
+    "Sinon alternative=null.\n"
     'Réponds STRICTEMENT en JSON : {"statut": "confirme" ou "doute", '
     '"raison": "une phrase courte en français", '
     '"confiance": "haute" ou "moyenne" ou "basse", '
