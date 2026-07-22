@@ -452,19 +452,6 @@ st.caption("Instruction automatisée de la grille ESG d'un actif — critères "
            "géolocalisés services (S2), biodiversité (S6) et mobilité (S7)")
 koala_walk()
 
-# Vérification IA en option (hors formulaire : le toggle révèle le champ de clé
-# immédiatement — dans un st.form il ne réagirait qu'à la soumission).
-verif_ia = st.toggle(
-    "Vérification IA du résultat (OpenAI)", value=False,
-    help="Si activé, chaque critère est vérifié par un modèle OpenAI AVANT la "
-         "génération du PDF (résultat cohérent ? verdict correct ?).")
-openai_key = ""
-if verif_ia:
-    openai_key = st.text_input(
-        "Clé API OpenAI", type="password", placeholder="sk-...",
-        help="La clé n'est ni stockée ni journalisée ; pensez à fixer une limite "
-             "de dépense sur platform.openai.com.")
-
 with st.form("esg"):
     st.markdown("**Critères à instruire** (cochez-en un ou plusieurs) :")
     checks_ui = {k: st.checkbox(label, value=False) for k, label in CRITERES}
@@ -480,6 +467,20 @@ with st.form("esg"):
     submitted = st.form_submit_button(
         "Générer le(s) rapport(s)",
         disabled=st.session_state.get("busy", False))
+
+# Vérification IA en option, placée SOUS le formulaire (plus intuitive). Hors
+# du st.form pour que le champ de clé apparaisse dès qu'on active le toggle
+# (dans un st.form il ne réagirait qu'à la soumission).
+verif_ia = st.toggle(
+    "Vérification IA du résultat (OpenAI)", value=False,
+    help="Si activé, chaque critère est vérifié par un modèle OpenAI AVANT la "
+         "génération du PDF (résultat cohérent ? verdict correct ?).")
+openai_key = ""
+if verif_ia:
+    openai_key = st.text_input(
+        "Clé API OpenAI", type="password", placeholder="sk-...",
+        help="La clé n'est ni stockée ni journalisée ; pensez à fixer une limite "
+             "de dépense sur platform.openai.com.")
 
 # --- Étape A : clic -> validation, puis on grise le bouton et on relance ---
 if submitted:
