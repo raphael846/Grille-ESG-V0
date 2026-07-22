@@ -23,6 +23,7 @@ import sys
 import tempfile
 import urllib.parse
 
+import ai_control
 import build_report
 import s6_auto
 
@@ -130,8 +131,12 @@ def nominatim_services(lat, lon, radius):
     return services
 
 
-def research(address, radius=1200, locataire=None):
-    """Sélectionne 3 services de catégories différentes validant le seuil."""
+def research(address, radius=1200, locataire=None, force_services=None):
+    """Sélectionne 3 services de catégories différentes validant le seuil.
+
+    `force_services` (liste de noms) impose des services réels désignés — sert
+    à appliquer un remplacement validé par l'utilisateur après un doute IA.
+    """
     lat, lon, vague, scale = s6_auto.geocode(address)
     checks = []
     if locataire:
@@ -173,26 +178,46 @@ def research(address, radius=1200, locataire=None):
             by_cat[s["cat"]] = s
     ordered = sorted(by_cat.values(), key=lambda s: s["crow_m"])
 
-    # Itinéraires calculés en parallèle sur les 6 catégories les plus proches
     import concurrent.futures
-    ordered = ordered[:REQUIRED * 2]
+    if force_services:
+        # Sélection imposée : retenir des services réels désignés (ex.
+        # remplacement validé par l'utilisateur après un doute du contrôle IA).
+        chosen = []
+        for name in force_services:
+            m = next((s for s in candidates
+                      if name.lower() in (s["name"] or "").lower()), None)
+            if m and m not in chosen:
+                chosen.append(m)
+        ordered = chosen or ordered[:REQUIRED * 2]
+    else:
+        # Itinéraires calculés en parallèle sur les 6 catégories les plus proches
+        ordered = ordered[:REQUIRED * 2]
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
         routes = list(ex.map(
             lambda s: s6_auto.walk_route(lat, lon, s["lat"], s["lon"]),
             ordered))
-    selected = []
     for s, (dist, mins, route_src) in zip(ordered, routes):
+        s.update(walk_distance_m=dist, walk_time_min=mins, route_src=route_src,
+                 maps_url=(f"https://www.google.com/maps/dir/{lat},{lon}/"
+                           f"{s['lat']},{s['lon']}/data=!4m2!4m1!3e2"))
+    # Pool de candidats réels (distances calculées) pour le contrôle IA.
+    candidates_list = [
+        {"name": s["name"], "cat": s["cat"], "lat": s["lat"], "lon": s["lon"],
+         "walk_distance_m": s["walk_distance_m"],
+         "walk_time_min": s["walk_time_min"]}
+        for s in sorted(ordered, key=lambda s: s["walk_distance_m"])
+    ]
+    selected = []
+    for s in ordered:
         if len(selected) >= REQUIRED:
             break
-        if dist <= THRESHOLD_M:
-            s.update(walk_distance_m=dist, walk_time_min=mins,
-                     route_src=route_src,
-                     maps_url=(f"https://www.google.com/maps/dir/{lat},{lon}/"
-                               f"{s['lat']},{s['lon']}/data=!4m2!4m1!3e2"))
+        if force_services or s["walk_distance_m"] <= THRESHOLD_M:
             selected.append(s)
-            if 900 <= dist <= THRESHOLD_M:
-                checks.append(f"ATTENTION : {s['name']} à {dist} m — proche "
-                              f"du seuil d'1 km")
+            if 900 <= s["walk_distance_m"] <= THRESHOLD_M:
+                checks.append(f"ATTENTION : {s['name']} à "
+                              f"{s['walk_distance_m']} m — proche du seuil "
+                              f"d'1 km")
 
     if degraded and len(selected) < REQUIRED:
         checks.append("ATTENTION : recherche de services DÉGRADÉE (serveurs "
@@ -210,6 +235,7 @@ def research(address, radius=1200, locataire=None):
         "score_max": REQUIRED,
         "threshold_m": THRESHOLD_M,
         "checks": checks,
+        "candidates": candidates_list,
     }
 
 
@@ -335,6 +361,17 @@ def build_pdf(cfg, proofs, out_pdf):
         story.append(Spacer(1, 3))
         story.append(Paragraph("Contrôles automatiques : "
                                + " ; ".join(cfg["checks"]), st_cap))
+    ai = cfg.get("ai_control")
+    if ai:
+        prefix = {"confirme": "Confirmé", "doute": "DOUTE",
+                  "indisponible": "Indisponible"}.get(ai["statut"], "")
+        txt = f"Contrôle IA : {prefix} — {ai.get('raison', '')}"
+        if ai.get("confiance"):
+            txt += f" (confiance {ai['confiance']})"
+        if ai.get("resolution"):
+            txt += f" ; décision : {ai['resolution']}"
+        story.append(Spacer(1, 3))
+        story.append(Paragraph(txt, st_cap))
 
     story.append(Paragraph("Preuves", st_h2))
     proof_colors = ("#1a73e8", "#188038", "#9333ea")
@@ -384,6 +421,11 @@ def build_pdf(cfg, proofs, out_pdf):
         concl = (f"{n} services de catégories différentes se trouvent à "
                  f"moins d'1 km à pied du site : {det}. Le critère S2 est "
                  f"validé : {cfg['score']}/{cfg['score_max']}.")
+    elif cfg.get("score_overridden"):
+        concl = (f"Après contrôle, le critère S2 est jugé non validé : "
+                 f"0/{cfg['score_max']}."
+                 + (f" {cfg['override_note']}." if cfg.get("override_note")
+                    else ""))
     else:
         concl = (f"Seulement {n} service(s) de catégories différentes "
                  f"trouvé(s) à moins d'1 km à pied du site (minimum requis : "
@@ -403,13 +445,28 @@ def main():
     ap.add_argument("--radius", type=int, default=1200)
     ap.add_argument("--offline", action="store_true",
                     help="pas de capture ni de carte en ligne")
+    ap.add_argument("--force-services", default=None,
+                    help="services réels imposés, séparés par « | » — pour "
+                         "appliquer un remplacement validé après un doute IA")
+    ap.add_argument("--force-score", type=int, choices=(0, REQUIRED),
+                    default=None, help="forcer le score après accord utilisateur")
+    ap.add_argument("--override-note", default=None,
+                    help="explication inscrite dans le PDF si le score est forcé")
     args = ap.parse_args()
 
+    force_services = ([s.strip() for s in args.force_services.split("|")
+                       if s.strip()] if args.force_services else None)
     try:
         cfg = research(args.address, radius=args.radius,
-                       locataire=args.locataire)
+                       locataire=args.locataire, force_services=force_services)
     except Exception as e:
         sys.exit(f"Recherche impossible : {e}")
+
+    if args.force_score is not None:
+        cfg["score"] = args.force_score
+        cfg["score_overridden"] = True
+        if args.override_note:
+            cfg["override_note"] = args.override_note
 
     for c in cfg.get("checks", []):
         print(f"Contrôle : {c}")
@@ -419,6 +476,11 @@ def main():
     if cfg["score"] == 0:
         print(f"Moins de {REQUIRED} services validés : score 0/{REQUIRED}.",
               file=sys.stderr)
+
+    verdict = ai_control.review_s2(cfg)
+    if verdict:
+        cfg["ai_control"] = verdict
+        ai_control.print_verdict(verdict, item="service")
 
     proofs = gather_proofs(cfg, offline=args.offline)
     build_pdf(cfg, proofs, args.out)

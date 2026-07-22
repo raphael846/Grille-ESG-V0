@@ -20,6 +20,7 @@ import datetime
 import sys
 import urllib.parse
 
+import ai_control
 import build_report
 import s2_auto
 import s6_auto
@@ -119,7 +120,7 @@ def stop_lines(stop):
     return sorted(refs)
 
 
-def research(address, locataire=None):
+def research(address, locataire=None, force_stops=None):
     lat, lon, vague, scale = s6_auto.geocode(address)
     checks = []
     if locataire:
@@ -166,17 +167,24 @@ def research(address, locataire=None):
         if s["mode"] not in by_mode or s["crow_m"] < by_mode[s["mode"]]["crow_m"]:
             by_mode[s["mode"]] = s
     ordered = sorted(by_mode.values(), key=lambda s: s["crow_m"])[:4]
+    if force_stops:
+        # Sélection imposée : arrêts réels désignés (ex. remplacement validé
+        # par l'utilisateur après un doute du contrôle IA).
+        chosen = []
+        for name in force_stops:
+            m = next((s for s in stops
+                      if name.lower() in (s.get("name") or "").lower()), None)
+            if m and m not in chosen:
+                chosen.append(m)
+        ordered = chosen or ordered
     import concurrent.futures
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
         routes = list(ex.map(
             lambda s: s6_auto.walk_route(lat, lon, s["lat"], s["lon"]),
             ordered))
 
-    selected = []
     sector_note = False
     for s, (dist, mins, route_src) in zip(ordered, routes):
-        if dist > THRESHOLD_M or len(selected) >= 3:
-            continue
         # Lignes de CET arrêt ; à défaut, celles du secteur (avec mention)
         refs = stop_lines(s)
         if not refs:
@@ -186,10 +194,23 @@ def research(address, locataire=None):
                  route_src=route_src, lines=refs,
                  maps_url=(f"https://www.google.com/maps/dir/{lat},{lon}/"
                            f"{s['lat']},{s['lon']}/data=!4m2!4m1!3e2"))
-        selected.append(s)
-        if 900 <= dist <= THRESHOLD_M:
-            checks.append(f"ATTENTION : arrêt {s['name']} à {dist} m — "
-                          f"proche du seuil d'1 km")
+    # Pool de candidats réels (distances calculées) pour le contrôle IA.
+    candidates_list = [
+        {"name": s["name"], "mode": s["mode"], "lat": s["lat"], "lon": s["lon"],
+         "walk_distance_m": s["walk_distance_m"],
+         "walk_time_min": s["walk_time_min"], "lines": s.get("lines", [])}
+        for s in sorted(ordered, key=lambda s: s["walk_distance_m"])
+    ]
+    selected = []
+    for s in ordered:
+        if len(selected) >= 3:
+            break
+        if force_stops or s["walk_distance_m"] <= THRESHOLD_M:
+            selected.append(s)
+            if 900 <= s["walk_distance_m"] <= THRESHOLD_M:
+                checks.append(f"ATTENTION : arrêt {s['name']} à "
+                              f"{s['walk_distance_m']} m — proche du seuil "
+                              f"d'1 km")
 
     if sector_note:
         checks.append("attribution des lignes par arrêt indisponible pour "
@@ -212,6 +233,7 @@ def research(address, locataire=None):
         "score_max": POINTS,
         "threshold_m": THRESHOLD_M,
         "checks": checks,
+        "candidates": candidates_list,
     }
 
 
@@ -298,6 +320,17 @@ def build_pdf(cfg, proofs, out_pdf):
         story.append(Spacer(1, 3))
         story.append(Paragraph("Contrôles automatiques : "
                                + " ; ".join(cfg["checks"]), st_cap))
+    ai = cfg.get("ai_control")
+    if ai:
+        prefix = {"confirme": "Confirmé", "doute": "DOUTE",
+                  "indisponible": "Indisponible"}.get(ai["statut"], "")
+        txt = f"Contrôle IA : {prefix} — {ai.get('raison', '')}"
+        if ai.get("confiance"):
+            txt += f" (confiance {ai['confiance']})"
+        if ai.get("resolution"):
+            txt += f" ; décision : {ai['resolution']}"
+        story.append(Spacer(1, 3))
+        story.append(Paragraph(txt, st_cap))
 
     story.append(Paragraph("Preuves", st_h2))
     proof_colors = ("#1a73e8", "#188038", "#9333ea")
@@ -348,6 +381,11 @@ def build_pdf(cfg, proofs, out_pdf):
         concl = (f"Le site est desservi par {cfg['transports']} à moins "
                  f"d'1 km à pied : {det}. Le critère S7 est validé : "
                  f"{cfg['score']}/{cfg['score_max']}.")
+    elif cfg.get("score_overridden"):
+        concl = (f"Après contrôle, le critère S7 est jugé non validé : "
+                 f"0/{cfg['score_max']}."
+                 + (f" {cfg['override_note']}." if cfg.get("override_note")
+                    else ""))
     else:
         concl = (f"Desserte insuffisante à moins d'1 km à pied "
                  f"({det or 'aucun arrêt'}) — il faut au moins 2 modes "
@@ -363,12 +401,28 @@ def main():
     ap.add_argument("--out", required=True, help="chemin du PDF de sortie")
     ap.add_argument("--locataire", default=None)
     ap.add_argument("--offline", action="store_true")
+    ap.add_argument("--force-stops", default=None,
+                    help="arrêts réels imposés, séparés par « | » — pour "
+                         "appliquer un remplacement validé après un doute IA")
+    ap.add_argument("--force-score", type=int, choices=(0, POINTS),
+                    default=None, help="forcer le score après accord utilisateur")
+    ap.add_argument("--override-note", default=None,
+                    help="explication inscrite dans le PDF si le score est forcé")
     args = ap.parse_args()
 
+    force_stops = ([s.strip() for s in args.force_stops.split("|")
+                    if s.strip()] if args.force_stops else None)
     try:
-        cfg = research(args.address, locataire=args.locataire)
+        cfg = research(args.address, locataire=args.locataire,
+                       force_stops=force_stops)
     except Exception as e:
         sys.exit(f"Recherche impossible : {e}")
+
+    if args.force_score is not None:
+        cfg["score"] = args.force_score
+        cfg["score_overridden"] = True
+        if args.override_note:
+            cfg["override_note"] = args.override_note
 
     for c in cfg.get("checks", []):
         print(f"Contrôle : {c}")
@@ -377,6 +431,11 @@ def main():
               f"({s['walk_distance_m']} m, {s['walk_time_min']} min, "
               f"{len(s['lines'])} ligne(s))")
     print(f"Verdict : {cfg['transports']} → {cfg['score']}/{cfg['score_max']}")
+
+    verdict = ai_control.review_s7(cfg)
+    if verdict:
+        cfg["ai_control"] = verdict
+        ai_control.print_verdict(verdict, item="arrêt")
 
     proofs = s2_auto.gather_proofs(cfg, offline=args.offline)
     build_pdf(cfg, proofs, args.out)
